@@ -1,11 +1,25 @@
+// src/api.ts - Complete file with improvements for API and Socket handling
 import axios from 'axios';
+import { io, Socket } from 'socket.io-client';
+
+// Determine the correct API base URL based on environment
+const getBaseUrl = () => {
+  // In development, use the backend port directly
+  if (process.env.NODE_ENV === 'development') {
+    return 'http://localhost:5001/api';
+  }
+  // In production, use the relative path which will be handled by the server
+  return '/api';
+};
 
 // Create a reusable axios instance with base configuration
 const apiClient = axios.create({
-    baseURL: '/api', // Use relative URL to work with both development and production
+    baseURL: getBaseUrl(),
     headers: {
       'Content-Type': 'application/json',
     },
+    // Add timeout to prevent hanging requests
+    timeout: 30000,
 });
 
 // Fix the auth interceptor
@@ -17,6 +31,10 @@ apiClient.interceptors.request.use(
           // Add token to authorization header
           config.headers['Authorization'] = `Bearer ${token}`;
       }
+      
+      // Log the request
+      console.log(`[API] ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`);
+      
       return config;
   },
   (error) => {
@@ -63,6 +81,7 @@ export interface Company {
   oldbsecode?: string;
   symbol?: string; // For compatibility with old API responses
   name?: string; // For compatibility with old API responses
+  industry?: string;
 }
 
 export interface Filing {
@@ -93,6 +112,8 @@ export interface ProcessedAnnouncement {
   url?: string;
   fileType?: string;
   isin?: string;
+  receivedAt?: number;
+  isNew?: boolean;
 }
 
 // Extract a headline from summary text
@@ -216,11 +237,27 @@ export const processAnnouncementData = (data: any[]): ProcessedAnnouncement[] =>
   data.forEach((item, index) => {
     // Extract important fields
     const isin = extractIsin(item);
-    const companyName = item.companyname || item.NewName || item.OldName || item.Symbol || "Unknown Company";
-    const ticker = item.symbol || item.Symbol || item.newnsecode || item.oldnsecode || "";
-    const category = item.Category || item.category || "Other";
-    const summary = item.ai_summary || item.summary || "";
-    const date = item.date || item.created_at || new Date().toISOString();
+    const companyName = item.companyname || item.SLONGNAME || item.NewName || item.OldName || item.Symbol || "Unknown Company";
+    const ticker = item.symbol || item.Symbol || item.newnsecode || item.oldnsecode || item.SCRIP_CD?.toString() || "";
+    
+    // Use the correct category field based on available data
+    const category = item.Category || item.category || item.CATEGORYNAME || "Other";
+    
+    // Get the summary from available fields
+    let summary = "";
+    if (item.ai_summary) {
+      summary = item.ai_summary;
+    } else if (item.summary) {
+      summary = item.summary;
+    } else if (item.MORE) {
+      // Format data from the BSE API
+      summary = `**Category:** ${item.CATEGORYNAME || "Other"}\n**Headline:** ${item.HEADLINE || ""}\n\n${item.MORE || ""}`;
+    } else {
+      summary = item.HEADLINE || "";
+    }
+    
+    // Get the date from available fields
+    const date = item.date || item.created_at || item.DT_TM || item.News_submission_dt || new Date().toISOString();
     
     // Format date for display
     const formattedDate = new Date(date).toLocaleDateString('en-US', {
@@ -237,8 +274,14 @@ export const processAnnouncementData = (data: any[]): ProcessedAnnouncement[] =>
       sentiment = "Negative";
     }
     
+    // Get URL for attachments
+    let url = item.fileurl || item.url;
+    if (item.ATTACHMENTNAME && !url) {
+      url = `https://www.bseindia.com/xml-data/corpfiling/AttachLive/${item.ATTACHMENTNAME}`;
+    }
+    
     processedData.push({
-      id: item.id || item.corp_id || `filing-${index}-${Date.now()}`,
+      id: item.id || item.corp_id || item.NEWSID || `filing-${index}-${Date.now()}`,
       company: companyName,
       ticker: ticker,
       category: category,
@@ -246,8 +289,10 @@ export const processAnnouncementData = (data: any[]): ProcessedAnnouncement[] =>
       date: formattedDate,
       summary: summary,
       detailedContent: summary,
-      url: item.fileurl || item.url,
-      isin: isin
+      url: url,
+      isin: isin,
+      receivedAt: item.receivedAt || Date.now(),
+      isNew: !!item.isNew // Ensure isNew is a boolean
     });
   });
   
@@ -256,8 +301,20 @@ export const processAnnouncementData = (data: any[]): ProcessedAnnouncement[] =>
     return generateTestData(3);
   }
   
-  // Sort by date (newest first)
+  // Sort by receivedAt first (for new announcements), then by date (newest first)
   return processedData.sort((a, b) => {
+    // First sort by isNew
+    if (a.isNew && !b.isNew) return -1;
+    if (!a.isNew && b.isNew) return 1;
+    
+    // Then sort by receivedAt
+    const receivedAtA = a.receivedAt || 0;
+    const receivedAtB = b.receivedAt || 0;
+    if (receivedAtA !== receivedAtB) {
+      return receivedAtB - receivedAtA;
+    }
+    
+    // If receivedAt is the same, sort by date
     const dateA = a.date === 'Unknown Date' ? new Date(0) : new Date(a.date);
     const dateB = b.date === 'Unknown Date' ? new Date(0) : new Date(b.date);
     return dateB.getTime() - dateA.getTime();
@@ -292,14 +349,15 @@ const generateTestData = (count: number): ProcessedAnnouncement[] => {
       }),
       summary: summary,
       detailedContent: `${summary}\n\n## Additional Details\n\nThis is a detailed content for test announcement ${i+1}.`,
-      isin: `TEST${i}1234567890`
+      isin: `TEST${i}1234567890`,
+      receivedAt: Date.now()
     });
   }
   
   return testData;
 };
 
-// Fetch announcements from the server
+// Fetch announcements from the server with improved error handling
 export const fetchAnnouncements = async (fromDate: string = '', toDate: string = '', category: string = '') => {
   // Format dates as YYYY-MM-DD if not already
   const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
@@ -322,21 +380,56 @@ export const fetchAnnouncements = async (fromDate: string = '', toDate: string =
   }
   
   try {
-    const response = await apiClient.get(url);
+    console.log(`Fetching announcements: ${url}`);
+    
+    // Add a timeout to prevent hanging requests
+    const response = await apiClient.get(url, { timeout: 10000 });
+    
+    console.log(`Announcements response status:`, response.status);
     
     let processedData: ProcessedAnnouncement[] = [];
     
     if (response.data && response.data.filings) {
+      console.log(`Received ${response.data.filings.length} filings`);
       processedData = processAnnouncementData(response.data.filings);
     } else if (Array.isArray(response.data)) {
+      console.log(`Received ${response.data.length} filings in array format`);
       processedData = processAnnouncementData(response.data);
     } else {
+      console.warn('No filings data found in response, falling back to test data');
       processedData = generateTestData(3);
     }
     
-    return enhanceAnnouncementData(processedData);
+    // Apply the enhancement to ensure all fields are properly formatted
+    const enhancedData = enhanceAnnouncementData(processedData);
+    
+    // Make sure newest are first by sorting again
+    return enhancedData.sort((a, b) => {
+      // First sort by isNew flag
+      if (a.isNew && !b.isNew) return -1;
+      if (!a.isNew && b.isNew) return 1;
+      
+      // Then by date (newest first)
+      const dateA = new Date(a.date).getTime();
+      const dateB = new Date(b.date).getTime();
+      return dateB - dateA;
+    });
   } catch (error) {
     console.error("Error fetching announcements:", error);
+    
+    // Try the fallback endpoint if the main one fails
+    try {
+      console.log("Trying fallback test endpoint...");
+      const fallbackResponse = await apiClient.get('/test_corporate_filings');
+      if (fallbackResponse.data && fallbackResponse.data.filings) {
+        return enhanceAnnouncementData(processAnnouncementData(fallbackResponse.data.filings));
+      }
+    } catch (fallbackError) {
+      console.error("Fallback also failed:", fallbackError);
+    }
+    
+    // If all else fails, return test data
+    console.log("Using generated test data as last resort");
     return enhanceAnnouncementData(generateTestData(3));
   }
 };
@@ -477,32 +570,39 @@ export const searchCompanies = async (query: string, limit?: number) => {
   }
 };
 
-// Setup Socket.IO connection for real-time updates
-// Add this to the end of your api.ts file (before the export default)
-
-import { io, Socket } from 'socket.io-client';
-
-// Setup Socket.IO connection for real-time updates
+// Setup Socket.IO connection for real-time updates with improved error handling
 export const setupSocketConnection = (onNewAnnouncement: (data: any) => void) => {
+  // Determine the correct WebSocket URL based on environment
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = window.location.hostname;
+  const port = process.env.NODE_ENV === 'development' ? '5001' : window.location.port;
+  
+  // Create the WebSocket URL that explicitly points to the backend server
+  const socketUrl = `${window.location.protocol}//${host}:${port}`;
+  console.log(`Connecting to WebSocket server at: ${socketUrl}`);
+  
   // Create socket connection with proper configuration
-  const socket: Socket = io('/', {
-    // Use the same path as your server
-    path: '/socket.io',
-    // Automatically reconnect if connection is lost
+  const socket: Socket = io(socketUrl, {
+    path: '/socket.io', // Make sure this matches the server path
     reconnection: true,
-    reconnectionAttempts: 5,
+    reconnectionAttempts: Infinity,
     reconnectionDelay: 1000,
-    // Additional options for better connection stability
-    timeout: 10000
+    reconnectionDelayMax: 5000,
+    timeout: 20000,
+    // Force transport options to handle potential WebSocket connection issues
+    transports: ['websocket', 'polling']
   });
 
   // Connection event handlers
   socket.on('connect', () => {
     console.log('Connected to WebSocket server for real-time announcements');
+    // Dispatch custom event
+    window.dispatchEvent(new Event('socket:connect'));
   });
 
   socket.on('disconnect', (reason) => {
     console.log('Disconnected from WebSocket server:', reason);
+    window.dispatchEvent(new Event('socket:disconnect'));
     
     // If the server disconnected us, try to reconnect
     if (reason === 'io server disconnect') {
@@ -512,70 +612,81 @@ export const setupSocketConnection = (onNewAnnouncement: (data: any) => void) =>
 
   socket.on('connect_error', (error) => {
     console.error('Socket connection error:', error);
-  });
-
-  socket.on('reconnect', (attemptNumber) => {
-    console.log(`Socket reconnected after ${attemptNumber} attempts`);
+    const errorEvent = new CustomEvent('socket:error', { 
+      detail: { message: error.message } 
+    });
+    window.dispatchEvent(errorEvent);
   });
 
   socket.on('reconnect_attempt', (attemptNumber) => {
     console.log(`Socket reconnection attempt #${attemptNumber}`);
   });
 
-  socket.on('error', (error) => {
-    console.error('Socket error:', error);
-  });
-
-  // Listen for new announcements
+  // Listen for new announcements with improved error handling
   socket.on('new_announcement', (data) => {
     console.log('Received new announcement via socket:', data);
     
-    // Process the raw announcement data before passing it to the callback
-    // This allows us to format it consistently with the rest of the app
-    const processedData = processAnnouncementData([data])[0];
-    
-    // Apply the enhancement function to standardize the announcement format
-    const enhancedData = enhanceAnnouncementData([processedData])[0];
-    
-    // Pass the processed announcement to the callback
-    onNewAnnouncement(enhancedData);
+    try {
+      // Pass the raw announcement data to the callback
+      onNewAnnouncement(data);
+      
+      // Also dispatch a custom event
+      const announcementEvent = new CustomEvent('new:announcement', { detail: data });
+      window.dispatchEvent(announcementEvent);
+    } catch (error) {
+      console.error('Error processing announcement:', error);
+    }
   });
 
-  // Listen for status updates
-  socket.on('status', (data) => {
-    console.log('Socket status update:', data.message);
-  });
-
-  // Return methods to interact with the socket
   return {
-    // Join a room to receive updates about specific companies or ISINs
     joinRoom: (room: string) => {
+      if (!room || typeof room !== 'string') {
+        console.warn('Invalid room name provided to joinRoom');
+        return;
+      }
+      
       if (socket.connected) {
         console.log(`Joining room: ${room}`);
         socket.emit('join', { room });
       } else {
-        console.warn(`Cannot join room ${room}: Socket not connected`);
-        // Queue this request for when the connection is established
-        socket.on('connect', () => {
+        console.log(`Socket not connected, queuing room join: ${room}`);
+        socket.once('connect', () => {
           console.log(`Socket connected, now joining room: ${room}`);
           socket.emit('join', { room });
         });
       }
     },
     
-    // Leave a room to stop receiving updates about specific companies or ISINs
     leaveRoom: (room: string) => {
+      if (!room || typeof room !== 'string') {
+        console.warn('Invalid room name provided to leaveRoom');
+        return;
+      }
+      
       if (socket.connected) {
         console.log(`Leaving room: ${room}`);
         socket.emit('leave', { room });
+      } else {
+        console.warn(`Cannot leave room ${room}: Socket not connected`);
       }
     },
     
-    // Disconnect the socket when no longer needed
     disconnect: () => {
       console.log('Disconnecting socket');
       socket.disconnect();
-    }
+    },
+    
+    // Method to manually attempt reconnection
+    reconnect: () => {
+      if (!socket.connected) {
+        console.log('Manually attempting to reconnect socket...');
+        socket.connect();
+      }
+    },
+    
+    // Method to check connection status
+    isConnected: () => socket.connected
   };
 };
+
 export default apiClient;

@@ -665,10 +665,20 @@ Dont start with something like intro like "Okay here is the summary". You should
             for attempt in range(1, self.max_retries + 1):
                 try:
                     response = supabase.table("corporatefilings").insert(data).execute()
-                    logger.info(f"Data uploaded to Supabase for {scrip_id}")
-                    post_url = "http://localhost:5001/insert_new_announcement"
+                    # logger.info(f"Data uploaded to Supabase for {scrip_id}")
+                    # latest_ann = load_latest_announcement()
+                    # lat_date = latest_ann.get("News_submission_dt", "")
+                    # now_date = date.fromisoformat(date)
+                    # lat_date = date.fromisoformat(lat_date)
+                    # if lat_date < now_date:
+                    #     logger.info(f"New announcement detected: {bse_summary}")
+                    post_url = "http://localhost:5001/api/insert_new_announcement"
                     res = requests.post(url=post_url, json=data)
-                    return True 
+                    #     save_success = save_latest_announcement(announcement)
+                    #     if not save_success:
+                    #         logger.error("Failed to save the latest announcement")
+                    
+                    # return True 
                 except Exception as e:
                     logger.error(f"Error uploading to Supabase (attempt {attempt}/{self.max_retries}): {e}")
                     

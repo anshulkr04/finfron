@@ -1,5 +1,7 @@
-import React, { useState, useEffect, useRef, useContext } from 'react';
-import { Search, Calendar as CalendarIcon, Filter as FilterIcon } from 'lucide-react';
+// src/components/Dashboard.tsx - Complete implementation with real-time announcement support
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Search, Calendar, Filter, RefreshCw, AlertTriangle, Star, StarOff, Bell } from 'lucide-react';
 import { fetchAnnouncements, ProcessedAnnouncement, Company, searchCompanies } from '../api';
 import MainLayout from './layout/MainLayout';
 import MetricsPanel from './common/MetricsPanel';
@@ -7,19 +9,23 @@ import DetailPanel from './announcements/DetailPanel';
 import FilterModal from './common/FilterModal';
 import Pagination from './common/Pagination';
 import { useFilters } from '../context/FilterContext';
-import { Star, StarOff } from 'lucide-react';
-import { extractHeadline } from '../utils/apiUtils';
 import AnnouncementRow from './announcements/AnnouncementRow';
-import { SocketContext } from '../context/SocketContext';
+import { useSocket } from '../context/SocketContext';
+import SocketStatusIndicator from './common/SocketStatusIndicator';
 import { toast } from 'react-hot-toast';
 
 // Define an interface for the API search results
 interface CompanySearchResult {
-  ISIN: string;
+  ISIN?: string;
+  isin?: string;
   NewName?: string;
+  newname?: string;
   OldName?: string;
+  oldname?: string;
   NewNSEcode?: string;
+  newnsecode?: string;
   OldNSEcode?: string;
+  oldnsecode?: string;
   industry?: string;
 }
 
@@ -31,7 +37,11 @@ interface DashboardProps {
 
 const ITEMS_PER_PAGE = 15; // Number of announcements per page
 
-const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newAnnouncements = [] }) => {
+const Dashboard: React.FC<DashboardProps> = ({ 
+  onNavigate, 
+  onCompanySelect, 
+  newAnnouncements = [] 
+}) => {
   // State management
   const [announcements, setAnnouncements] = useState<ProcessedAnnouncement[]>([]);
   const [filteredAnnouncements, setFilteredAnnouncements] = useState<ProcessedAnnouncement[]>([]);
@@ -42,18 +52,28 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [viewedAnnouncements, setViewedAnnouncements] = useState<string[]>([]);
+  const [NewAnnouncements, setNewAnnouncements] = useState<ProcessedAnnouncement[]>([]);
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [filterType, setFilterType] = useState<'all' | 'company' | 'category'>('all');
-  
-  // Access socket context
-  const socketContext = useContext(SocketContext);
+  const [showNewIndicator, setShowNewIndicator] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
   
   // Search-specific state
   const [searchResults, setSearchResults] = useState<CompanySearchResult[]>([]);
   const [isSearchLoading, setIsSearchLoading] = useState(false);
   const [showSearchResults, setShowSearchResults] = useState(false);
-  const searchRef = useRef<HTMLDivElement>(null);
   
+  // Refs
+  const searchRef = useRef<HTMLDivElement>(null);
+  const announcementListRef = useRef<HTMLDivElement>(null);
+  const initialLoadComplete = useRef(false);
+  const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const loadingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Access socket context
+  const socketContext = useSocket();
+  
+  // Access filter context
   const { 
     filters, 
     setSearchTerm, 
@@ -64,102 +84,87 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
     setSelectedIndustries
   } = useFilters();
   
-  // Handle new announcements from socket
+  // Function to merge new announcements with existing ones
+  const mergeNewAnnouncements = useCallback((
+    existingAnnouncements: ProcessedAnnouncement[],
+    incomingAnnouncements: ProcessedAnnouncement[]
+  ) => {
+    if (!incomingAnnouncements || incomingAnnouncements.length === 0) {
+      return existingAnnouncements;
+    }
+    
+    // Create a Map of existing announcements by ID for quick lookup
+    const existingMap = new Map(existingAnnouncements.map(a => [a.id, a]));
+    
+    // Process each incoming announcement
+    incomingAnnouncements.forEach(incoming => {
+      // Check if we already have this announcement
+      if (!existingMap.has(incoming.id)) {
+        // New announcement - add it to the map
+        existingMap.set(incoming.id, {
+          ...incoming,
+          isNew: true, // Mark as new
+          receivedAt: Date.now() // Add timestamp
+        });
+        console.log(`Added new announcement: ${incoming.id} - ${incoming.company}`);
+      }
+    });
+    
+    // Convert map back to array and sort by date (newest first)
+    const mergedAnnouncements = Array.from(existingMap.values()).sort((a, b) => {
+      // Use receivedAt timestamp for sorting if available
+      const dateA = a.receivedAt || new Date(a.date).getTime();
+      const dateB = b.receivedAt || new Date(b.date).getTime();
+      return dateB - dateA;
+    });
+    
+    return mergedAnnouncements;
+  }, []);
+
+  
+
+  const markAnnouncementAsRead = useCallback((id: string) => {
+    // Update the viewed announcements list
+    if (!viewedAnnouncements.includes(id)) {
+      const updatedViewed = [...viewedAnnouncements, id];
+      setViewedAnnouncements(updatedViewed);
+      localStorage.setItem('viewedAnnouncements', JSON.stringify(updatedViewed));
+    }
+    
+    // Also update the newAnnouncements state by removing this announcement
+    setNewAnnouncements(prev => prev.filter(a => a.id !== id));
+    
+    // Update the main announcements list to remove the isNew flag
+    setAnnouncements(prev => prev.map(announcement => 
+      announcement.id === id 
+        ? { ...announcement, isNew: false } 
+        : announcement
+    ));
+  }, [viewedAnnouncements, setNewAnnouncements]);
+
+  const handleAnnouncementClick = (announcement: ProcessedAnnouncement) => {
+    // Mark as viewed when clicked
+    markAnnouncementAsRead(announcement.id);
+    
+    // Show the detail panel
+    setSelectedDetail(announcement);
+  };
+  
+  // Handle new announcements from socket (coming from App component)
   useEffect(() => {
     if (newAnnouncements && newAnnouncements.length > 0) {
-      // Merge with existing announcements, ensuring no duplicates by ID
-      setAnnouncements(prev => {
-        const existingIds = new Set(prev.map(a => a.id));
-        const uniqueNewAnnouncements = newAnnouncements.filter(a => !existingIds.has(a.id));
-        
-        if (uniqueNewAnnouncements.length === 0) return prev;
-        
-        // Add new announcements at the beginning of the list
-        return [...uniqueNewAnnouncements, ...prev];
-      });
-    }
-  }, [newAnnouncements]);
-  
-  // Fetch data from API with improved date handling
-  useEffect(() => {
-    const loadAnnouncements = async () => {
-      setIsLoading(true);
-      setError(null);
+      console.log(`Dashboard received ${newAnnouncements.length} new announcements from App`);
       
-      try {
-        // Check if dates are valid before fetching
-        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-        const startDate = dateRegex.test(filters.dateRange.start) ? filters.dateRange.start : '';
-        const endDate = dateRegex.test(filters.dateRange.end) ? filters.dateRange.end : '';
-        
-        console.log(`Fetching announcements with date range: ${startDate} to ${endDate}`);
-        
-        const industry = filters.selectedIndustries.length === 1 ? filters.selectedIndustries[0] : '';
-        const data = await fetchAnnouncements(startDate, endDate, industry);
-        
-        console.log(`Received ${data.length} announcements from API`);
-        
-        // Merge with any new announcements we've received via socket
-        if (newAnnouncements && newAnnouncements.length > 0) {
-          const existingIds = new Set(data.map(a => a.id));
-          const uniqueNewAnnouncements = newAnnouncements.filter(a => !existingIds.has(a.id));
-          
-          setAnnouncements([...uniqueNewAnnouncements, ...data]);
-        } else {
-          setAnnouncements(data);
-        }
-        
-        // Reset to first page when data changes
-        setCurrentPage(1);
-      } catch (err) {
-        console.error('Error fetching data:', err);
-        setError('Failed to load announcements. Please try again.');
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    
-    loadAnnouncements();
-  }, [filters.dateRange, filters.selectedIndustries]);
-  
-  // Apply additional filters
-  useEffect(() => {
-    let result = [...announcements];
-    
-    // Company filter
-    if (filters.selectedCompany) {
-      result = result.filter(item => item.company === filters.selectedCompany);
+      // Merge with existing announcements, ensuring no duplicates and proper ordering
+      setAnnouncements(prev => mergeNewAnnouncements(prev, newAnnouncements));
+      
+      // Show the new indicator
+      setShowNewIndicator(true);
+      
+      // Reset to first page to show new announcements
+      setCurrentPage(1);
     }
-    
-    // Search term filter - now including ISIN
-    if (filters.searchTerm) {
-      result = result.filter(item => 
-        item.company.toLowerCase().includes(filters.searchTerm.toLowerCase()) ||
-        item.summary.toLowerCase().includes(filters.searchTerm.toLowerCase()) ||
-        item.ticker.toLowerCase().includes(filters.searchTerm.toLowerCase()) ||
-        // Add ISIN to the search
-        (item.isin && item.isin.toLowerCase().includes(filters.searchTerm.toLowerCase()))
-      );
-    }
-    
-    if (filters.selectedCategories.length > 0) {
-      result = result.filter(item => filters.selectedCategories.includes(item.category));
-    }
-    
-    if (filters.selectedSentiments.length > 0) {
-      result = result.filter(item => filters.selectedSentiments.includes(item.sentiment));
-    }
-    
-    setFilteredAnnouncements(result);
-    // Reset to first page when filters change
-    setCurrentPage(1);
-  }, [
-    announcements, 
-    filters.searchTerm, 
-    filters.selectedCategories, 
-    filters.selectedSentiments, 
-    filters.selectedCompany
-  ]);
+  }, [newAnnouncements, mergeNewAnnouncements]);
   
   // Load viewed announcements from localStorage on mount
   useEffect(() => {
@@ -186,39 +191,293 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
     localStorage.setItem('savedFilings', JSON.stringify(savedFilings));
   }, [savedFilings]);
   
+  // Function to handle manual refresh/retry
+  const handleRetry = useCallback(() => {
+    console.log("Manual retry initiated");
+    setIsRetrying(true);
+    setIsLoading(true);
+    
+    // Retry socket connection if there's an error
+    if (socketContext && socketContext.connectionStatus === 'error') {
+      socketContext.reconnect();
+    }
+    
+    // Load announcements again
+    loadAnnouncements();
+    
+    // Set a timeout to reset the retrying state
+    if (retryTimeoutRef.current) {
+      clearTimeout(retryTimeoutRef.current);
+    }
+    
+    retryTimeoutRef.current = setTimeout(() => {
+      setIsRetrying(false);
+    }, 3000);
+  }, [socketContext]);
+  
+  // Enhanced announcement loading function
+  const loadAnnouncements = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    
+    // Set a timeout to show loading state for at least 500ms
+    // This prevents flickering for fast responses
+    if (loadingTimeoutRef.current) {
+      clearTimeout(loadingTimeoutRef.current);
+    }
+    
+    const minLoadingTime = new Promise(resolve => {
+      loadingTimeoutRef.current = setTimeout(resolve, 500);
+    });
+    
+    try {
+      console.log("Fetching announcements from API...");
+      // Check if dates are valid before fetching
+      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+      const startDate = dateRegex.test(filters.dateRange.start) ? filters.dateRange.start : '';
+      const endDate = dateRegex.test(filters.dateRange.end) ? filters.dateRange.end : '';
+      
+      const industry = filters.selectedIndustries.length === 1 ? filters.selectedIndustries[0] : '';
+      const data = await fetchAnnouncements(startDate, endDate, industry);
+      
+      // Wait for minimum loading time to complete
+      await minLoadingTime;
+      
+      console.log(`Received ${data.length} announcements from API`);
+      
+      // Merge with any new announcements we've received via socket
+      if (newAnnouncements && newAnnouncements.length > 0) {
+        const mergedData = mergeNewAnnouncements(data, newAnnouncements);
+        setAnnouncements(mergedData);
+      } else {
+        setAnnouncements(data);
+      }
+      
+      // Mark initial load as complete
+      initialLoadComplete.current = true;
+      
+      // Reset to first page when data changes
+      setCurrentPage(1);
+    } catch (err) {
+      console.error('Error fetching data:', err);
+      setError('Failed to load announcements. Please try again.');
+      
+      // If fetch fails but we have test data in our announcements state already, keep it
+      if (announcements.length === 0) {
+        // Generate test data since we have nothing to show
+        console.log("Generating test data as fallback");
+        const testData = generateTestData(3);
+        setAnnouncements(testData);
+      }
+    } finally {
+      await minLoadingTime; // Always wait for min loading time
+      setIsLoading(false);
+      setIsRetrying(false);
+    }
+  }, [filters.dateRange, filters.selectedIndustries, mergeNewAnnouncements, newAnnouncements]);
+  
+  // Generate test data as fallback
+  const generateTestData = (count: number): ProcessedAnnouncement[] => {
+    const testData: ProcessedAnnouncement[] = [];
+    const categories = ["Financial Results", "Dividend", "Mergers & Acquisitions"];
+    const sentiments = ["Positive", "Negative", "Neutral"];
+    
+    for (let i = 0; i < count; i++) {
+      const categoryIndex = i % categories.length;
+      const sentimentIndex = i % sentiments.length;
+      const category = categories[categoryIndex];
+      
+      // Create test data with formatting
+      const headline = `Test Announcement ${i+1} for ${category}`;
+      const summary = `**Category:** ${category}\n**Headline:** ${headline}\n\nThis is a test announcement ${i+1} for debugging purposes.`;
+      
+      testData.push({
+        id: `test-${i}-${Date.now()}`,
+        company: `Test Company ${i + 1}`,
+        ticker: `TC${i+1}`,
+        category: categories[categoryIndex],
+        sentiment: sentiments[sentimentIndex],
+        date: new Date().toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }),
+        summary: summary,
+        detailedContent: `${summary}\n\n## Additional Details\n\nThis is a detailed content for test announcement ${i+1}.`,
+        isin: `TEST${i}1234567890`
+      });
+    }
+    
+    return testData;
+  };
+  
+  // Apply additional filters
+  useEffect(() => {
+    let result = [...announcements];
+    
+    // Company filter
+    if (filters.selectedCompany) {
+      result = result.filter(item => item.company === filters.selectedCompany);
+    }
+    
+    // Search term filter - now including ISIN
+    if (filters.searchTerm) {
+      result = result.filter(item => 
+        item.company.toLowerCase().includes(filters.searchTerm.toLowerCase()) ||
+        item.summary.toLowerCase().includes(filters.searchTerm.toLowerCase()) ||
+        (item.ticker && item.ticker.toLowerCase().includes(filters.searchTerm.toLowerCase())) ||
+        (item.isin && item.isin.toLowerCase().includes(filters.searchTerm.toLowerCase()))
+      );
+    }
+    
+    if (filters.selectedCategories.length > 0) {
+      result = result.filter(item => filters.selectedCategories.includes(item.category));
+    }
+    
+    if (filters.selectedSentiments.length > 0) {
+      result = result.filter(item => item.sentiment && filters.selectedSentiments.includes(item.sentiment));
+    }
+    
+    setFilteredAnnouncements(result);
+    // Reset to first page when filters change
+    setCurrentPage(1);
+  }, [
+    announcements, 
+    filters.searchTerm, 
+    filters.selectedCategories, 
+    filters.selectedSentiments, 
+    filters.selectedCompany
+  ]);
+  
+  // Load announcements on mount and when filters change
+  useEffect(() => {
+    loadAnnouncements();
+    
+    return () => {
+      // Clear any timers on unmount
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current);
+      }
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+      }
+    };
+  }, [loadAnnouncements]);
+  
   // Join relevant rooms based on filters when socket is connected
   useEffect(() => {
     if (socketContext && socketContext.isConnected) {
-      // Join rooms for watched companies
+      console.log('Joining socket rooms based on filters');
+      
+      // Join the 'all' room to receive all announcements
+      socketContext.joinRoom('all');
+      
+      // Join rooms for filtered companies
       if (filters.selectedCompany) {
-        socketContext.joinRoom(filters.selectedCompany);
+        socketContext.joinRoom(`company:${filters.selectedCompany}`);
       }
       
       // Join specific industry or category rooms if we want to track these
       if (filters.selectedIndustries.length === 1) {
-        socketContext.joinRoom(filters.selectedIndustries[0]);
+        socketContext.joinRoom(`industry:${filters.selectedIndustries[0]}`);
       }
       
+      if (filters.selectedCategories.length > 0) {
+        filters.selectedCategories.forEach(category => {
+          socketContext.joinRoom(`category:${category}`);
+        });
+      }
+      
+      // Clean up function to leave rooms when component unmounts or filters change
       return () => {
-        // Leave rooms when component unmounts or filters change
+        socketContext.leaveRoom('all');
+        
         if (filters.selectedCompany) {
-          socketContext.leaveRoom(filters.selectedCompany);
+          socketContext.leaveRoom(`company:${filters.selectedCompany}`);
         }
+        
         if (filters.selectedIndustries.length === 1) {
-          socketContext.leaveRoom(filters.selectedIndustries[0]);
+          socketContext.leaveRoom(`industry:${filters.selectedIndustries[0]}`);
+        }
+        
+        if (filters.selectedCategories.length > 0) {
+          filters.selectedCategories.forEach(category => {
+            socketContext.leaveRoom(`category:${category}`);
+          });
         }
       };
     }
-  }, [socketContext, filters.selectedCompany, filters.selectedIndustries]);
+  }, [
+    socketContext, 
+    socketContext?.isConnected, 
+    filters.selectedCompany,
+    filters.selectedIndustries,
+    filters.selectedCategories
+  ]);
+  
+  // Handle search input changes with debouncing
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (filters.searchTerm && filters.searchTerm.length >= 2) {
+        const performSearch = async () => {
+          setIsSearchLoading(true);
+          try {
+            const results = await searchCompanies(filters.searchTerm, 5);
+            setSearchResults(results);
+            if (results.length > 0) {
+              setShowSearchResults(true);
+            }
+          } catch (err) {
+            console.error('Search error:', err);
+          } finally {
+            setIsSearchLoading(false);
+          }
+        };
+        
+        performSearch();
+      } else {
+        setShowSearchResults(false);
+      }
+    }, 300); // Debounce for 300ms
+    
+    return () => clearTimeout(timer);
+  }, [filters.searchTerm]);
+  
+  // Handle click outside search results
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(event.target as Node)) {
+        setShowSearchResults(false);
+      }
+    };
+    
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
+  
+  // Listen for custom event to open filter modal
+  useEffect(() => {
+    const handleOpenFilterModal = () => {
+      setShowFilterModal(true);
+    };
+
+    window.addEventListener('openFilterModal', handleOpenFilterModal);
+    
+    return () => {
+      window.removeEventListener('openFilterModal', handleOpenFilterModal);
+    };
+  }, []);
   
   // Handle search result selection
   const handleSearchSelect = (companyData: CompanySearchResult) => {
     // Create a Company object from the API response
     const company: Company = {
-      id: companyData.ISIN || `company-${Date.now()}`,
-      name: companyData.NewName || companyData.OldName || '',
-      symbol: companyData.NewNSEcode || companyData.OldNSEcode || '',
-      isin: companyData.ISIN || '',
+      id: companyData.ISIN || companyData.isin || `company-${Date.now()}`,
+      name: companyData.NewName || companyData.newname || companyData.OldName || companyData.oldname || '',
+      symbol: companyData.NewNSEcode || companyData.newnsecode || companyData.OldNSEcode || companyData.oldnsecode || '',
+      isin: companyData.ISIN || companyData.isin || '',
       industry: companyData.industry || ''
     };
     
@@ -247,10 +506,14 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
   const handlePageChange = (page: number) => {
     setCurrentPage(page);
     // Scroll to top of the list
-    window.scrollTo({
-      top: 0,
-      behavior: 'smooth'
-    });
+    if (announcementListRef.current) {
+      announcementListRef.current.scrollTop = 0;
+    } else {
+      window.scrollTo({
+        top: 0,
+        behavior: 'smooth'
+      });
+    }
   };
   
   // Toggle saved filing function
@@ -295,14 +558,14 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
   };
   
   // Handle announcement click - mark it as viewed
-  const handleAnnouncementClick = (announcement: ProcessedAnnouncement) => {
-    if (!viewedAnnouncements.includes(announcement.id)) {
-      const updatedViewed = [...viewedAnnouncements, announcement.id];
-      setViewedAnnouncements(updatedViewed);
-      localStorage.setItem('viewedAnnouncements', JSON.stringify(updatedViewed));
-    }
-    setSelectedDetail(announcement);
-  };
+  // const handleAnnouncementClick = (announcement: ProcessedAnnouncement) => {
+  //   if (!viewedAnnouncements.includes(announcement.id)) {
+  //     const updatedViewed = [...viewedAnnouncements, announcement.id];
+  //     setViewedAnnouncements(updatedViewed);
+  //     localStorage.setItem('viewedAnnouncements', JSON.stringify(updatedViewed));
+  //   }
+  //   setSelectedDetail(announcement);
+  // };
   
   // Handle company name click to navigate to company page
   const handleCompanyClick = (company: string, e: React.MouseEvent) => {
@@ -327,19 +590,48 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
     setFilterType(type);
     setShowFilterModal(true);
   };
-
-  // Listen for custom event to open filter modal
-  useEffect(() => {
-    const handleOpenFilterModal = () => {
-      setShowFilterModal(true);
-    };
-
-    window.addEventListener('openFilterModal', handleOpenFilterModal);
+  
+  // Handle scroll to new announcements
+  const handleScrollToNew = () => {
+    setCurrentPage(1); // Reset to first page
+    setShowNewIndicator(false); // Hide indicator
     
-    return () => {
-      window.removeEventListener('openFilterModal', handleOpenFilterModal);
-    };
-  }, []);
+    // After state update, scroll to top where new announcements are
+    setTimeout(() => {
+      if (announcementListRef.current) {
+        announcementListRef.current.scrollTop = 0;
+      } else {
+        window.scrollTo({
+          top: 0,
+          behavior: 'smooth'
+        });
+      }
+    }, 100);
+  };
+  
+  // Render socket connection error message if needed
+  const renderConnectionError = () => {
+    if (!socketContext || socketContext.connectionStatus === 'error') {
+      return (
+        <div className="bg-red-50 border-l-4 border-red-400 p-4 mb-4">
+          <div className="flex items-center">
+            <AlertTriangle className="h-5 w-5 text-red-400 mr-2" />
+            <p className="text-sm text-red-700">
+              Live updates are currently unavailable. 
+              <button 
+                onClick={handleRetry}
+                className="ml-2 text-red-900 underline hover:no-underline focus:outline-none"
+                disabled={isRetrying}
+              >
+                {isRetrying ? 'Reconnecting...' : 'Reconnect'}
+              </button>
+            </p>
+          </div>
+        </div>
+      );
+    }
+    return null;
+  };
   
   // Display current page announcements
   const displayedAnnouncements = getCurrentPageItems();
@@ -376,20 +668,22 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
             <ul className="max-h-80 overflow-y-auto divide-y divide-gray-100">
               {searchResults.map((company, index) => (
                 <li 
-                  key={company.ISIN || `result-${index}`} 
+                  key={company.ISIN || company.isin || `result-${index}`} 
                   className="p-3 hover:bg-gray-50 cursor-pointer transition-colors"
                   onClick={() => handleSearchSelect(company)}
                 >
-                  <div className="font-medium text-gray-900">{company.NewName || company.OldName}</div>
+                  <div className="font-medium text-gray-900">
+                    {company.NewName || company.newname || company.OldName || company.oldname}
+                  </div>
                   <div className="flex flex-wrap items-center mt-1 gap-2">
-                    {(company.NewNSEcode || company.OldNSEcode) && (
+                    {(company.NewNSEcode || company.newnsecode || company.OldNSEcode || company.oldnsecode) && (
                       <span className="text-xs font-semibold bg-gray-100 text-gray-800 px-2 py-0.5 rounded-md">
-                        {company.NewNSEcode || company.OldNSEcode}
+                        {company.NewNSEcode || company.newnsecode || company.OldNSEcode || company.oldnsecode}
                       </span>
                     )}
-                    {company.ISIN && (
+                    {(company.ISIN || company.isin) && (
                       <span className="text-xs font-semibold bg-blue-50 text-blue-800 px-2 py-0.5 rounded-md">
-                        ISIN: {company.ISIN}
+                        ISIN: {company.ISIN || company.isin}
                       </span>
                     )}
                     {company.industry && (
@@ -428,6 +722,45 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
     </div>
   );
   
+  // Render the dashboard header
+  const renderDashboardHeader = () => (
+    <div className="py-4 px-6 bg-white border-b border-gray-100 flex justify-between items-center">
+      <div className="flex items-center">
+        <h1 className="text-xl font-semibold text-gray-900">Announcements Dashboard</h1>
+        <div className="ml-3 flex items-center">
+          <div className="w-2 h-2 bg-green-500 rounded-full mr-1.5"></div>
+          <span className="text-xs font-medium text-gray-700">AI-Powered</span>
+        </div>
+        <SocketStatusIndicator className="ml-3" />
+        
+        {/* Retry button visible when error or loading */}
+        {(error || (socketContext && socketContext.connectionStatus === 'error')) && (
+          <button
+            onClick={handleRetry}
+            disabled={isRetrying || isLoading}
+            className="ml-4 flex items-center px-2 py-1 text-xs font-medium rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
+          >
+            <RefreshCw size={12} className={`mr-1 ${isRetrying ? 'animate-spin' : ''}`} />
+            {isRetrying ? 'Retrying...' : 'Retry'}
+          </button>
+        )}
+      </div>
+      
+      <div className="flex items-center">
+        <div className="mr-6 text-sm font-medium">
+          Filtered Announcements: {filteredAnnouncements.length}
+        </div>
+        {newAnnouncements.length > 0 && (
+          <div className="flex items-center text-sm font-medium text-blue-600">
+            <div className="w-1.5 h-1.5 bg-blue-500 rounded-full mr-2 badge-pulse"></div>
+            {newAnnouncements.length} new update{newAnnouncements.length !== 1 ? 's' : ''}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+  
+  // Main render
   return (
     <MainLayout 
       activePage="home"
@@ -438,32 +771,11 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
     >
       {/* Main content container with scrolling */}
       <div className="flex flex-col h-full overflow-auto">
-        {/* Dashboard header - will scroll away */}
-        <div className="py-4 px-6 bg-white border-b border-gray-100 flex justify-between items-center">
-          <div className="flex items-center">
-            <h1 className="text-xl font-semibold text-gray-900">Announcements Dashboard</h1>
-            <div className="ml-3 flex items-center">
-              <div className="w-2 h-2 bg-green-500 rounded-full mr-1.5"></div>
-              <span className="text-xs font-medium text-gray-700">AI-Powered</span>
-            </div>
-            {socketContext?.isConnected && (
-              <div className="ml-3 flex items-center">
-                <div className="w-2 h-2 bg-blue-500 rounded-full mr-1.5 animate-pulse"></div>
-                <span className="text-xs font-medium text-gray-700">Live Updates</span>
-              </div>
-            )}
-          </div>
-          
-          <div className="flex items-center">
-            <div className="mr-6 text-sm font-medium">
-              Filtered Announcements: {filteredAnnouncements.length}
-            </div>
-            <div className="flex items-center text-sm font-medium text-gray-700">
-              <div className="w-1.5 h-1.5 bg-green-500 rounded-full mr-2 animate-pulse"></div>
-              Real-time updates
-            </div>
-          </div>
-        </div>
+        {/* Custom dashboard header with retry button */}
+        {renderDashboardHeader()}
+        
+        {/* Connection error message if needed */}
+        {renderConnectionError()}
         
         {/* Metrics section - will scroll away */}
         <div className="bg-white border-b border-gray-100">
@@ -527,7 +839,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
         )}
         
         {/* Table with fixed header and scrollable content */}
-        <div className="flex-1 relative">
+        <div className="flex-1 relative" ref={announcementListRef}>
           {/* Table header - updated to match AnnouncementRow column layout */}
           <div className="sticky top-0 z-10 grid grid-cols-12 px-6 py-3 text-xs font-medium text-gray-500 uppercase bg-gray-50 border-b border-gray-200">
             <div className="col-span-3 flex items-center">
@@ -568,6 +880,13 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
             ) : error ? (
               <div className="py-16 flex items-center justify-center">
                 <div className="text-red-500">{error}</div>
+                <button
+                  onClick={handleRetry}
+                  className="ml-3 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-lg flex items-center"
+                >
+                  <RefreshCw size={16} className="mr-2" />
+                  Retry
+                </button>
               </div>
             ) : displayedAnnouncements.length === 0 ? (
               <div className="py-16 flex flex-col items-center justify-center">
@@ -596,6 +915,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
                   onClick={handleAnnouncementClick}
                   onCompanyClick={(company, e) => handleCompanyClick(company, e)}
                   isNew={newAnnouncements.some(a => a.id === announcement.id)}
+                  onMarkAsRead={markAnnouncementAsRead}
                 />
               ))
             )}
@@ -667,6 +987,23 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newA
           }}
           focusTab={filterType === 'category' ? 'categories' : filterType === 'company' ? 'industries' : undefined}
         />
+      )}
+      
+      {/* New announcements floating indicator */}
+      {showNewIndicator && newAnnouncements.length > 0 && (
+        <div className="fixed bottom-6 right-6 z-50 scale-in-animation">
+          <button
+            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-full shadow-lg flex items-center transition-colors"
+            onClick={handleScrollToNew}
+            aria-label={`${newAnnouncements.length} new announcements, click to view`}
+          >
+            <span className="badge-pulse mr-2 flex items-center justify-center">
+              <Bell size={16} />
+            </span>
+            <span className="font-medium mr-1">{newAnnouncements.length} new announcement{newAnnouncements.length !== 1 ? 's' : ''}</span>
+            <span className="ml-1">↑</span>
+          </button>
+        </div>
       )}
     </MainLayout>
   );

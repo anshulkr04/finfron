@@ -13,7 +13,7 @@
     "scraper": "cd backend && source .venv/bin/activate && python bse_scraper.py",
     "start": "concurrently --kill-others-on-fail \"npm run dev\" \"npm run backend\"",
     "start:debug": "concurrently --kill-others-on-fail \"npm run dev\" \"npm run backend:debug\"",
-    "start:with-scraper": "concurrently --kill-others-on-fail \"npm run dev\" \"npm run backend\" \"npm run scraper\""
+    "start:dev": "concurrently --kill-others-on-fail \"npm run dev\" \"npm run backend\" \"npm run scraper\""
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.8",
