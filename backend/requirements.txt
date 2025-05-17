@@ -1,0 +1,20 @@
+requests
+google-genai
+flask
+brotli
+dotenv
+supabase
+pandas
+tqdm
+kiteconnect
+pyotp
+flask-cors
+bson
+PyJWT
+# re
+apscheduler==3.10.1
+flask_socketio
+gevent
+gevent-websocket
+python-engineio
+python-socketio
