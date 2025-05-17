@@ -1,4 +1,5 @@
-// src/api.ts - Complete file with improvements for API and Socket handling
+// src/api.ts - Complete API implementation with enhanced date handling and socket management
+
 import axios from 'axios';
 import { io, Socket } from 'socket.io-client';
 
@@ -32,8 +33,10 @@ apiClient.interceptors.request.use(
           config.headers['Authorization'] = `Bearer ${token}`;
       }
       
-      // Log the request
-      console.log(`[API] ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`);
+      // Log the request in development
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[API] ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`);
+      }
       
       return config;
   },
@@ -55,7 +58,10 @@ apiClient.interceptors.response.use(
             if (error.response.status === 401) {
                 console.error('[API] Authentication error - Token might be invalid or expired');
                 // Optional: Redirect to login page or trigger a re-authentication flow
-                // window.location.href = '/login'; // Example: Redirect to login
+                // window.location.href = '/auth/login'; // Example: Redirect to login
+                
+                // Clear the invalid token
+                localStorage.removeItem('authToken');
             }
         } else if (error.request) {
             // The request was made but no response was received
@@ -70,6 +76,7 @@ apiClient.interceptors.response.use(
     }
 );
 
+// Type definitions
 export interface Company {
   id?: string;
   isin: string;
@@ -106,7 +113,8 @@ export interface ProcessedAnnouncement {
   industry?: string;
   category: string;
   sentiment?: string;
-  date: string;
+  date: string; // Original ISO format date for sorting
+  displayDate?: string; // Formatted date for display
   summary: string;
   detailedContent: string;
   url?: string;
@@ -114,6 +122,105 @@ export interface ProcessedAnnouncement {
   isin?: string;
   receivedAt?: number;
   isNew?: boolean;
+}
+
+// Date utilities for consistent handling throughout the application
+
+/**
+ * Formats a date string into a readable format
+ * Handles ISO-format dates like "2025-05-17T13:15:02"
+ */
+export function formatDate(dateString: string): string {
+  try {
+    if (!dateString) return "Unknown Date";
+    
+    // Handle ISO format
+    const date = new Date(dateString);
+    
+    // Check if date is valid
+    if (!isNaN(date.getTime())) {
+      return date.toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    }
+    
+    // Fallback - return original string if parsing fails
+    return dateString;
+  } catch (e) {
+    console.error(`Error formatting date: ${dateString}`, e);
+    return dateString;
+  }
+}
+
+/**
+ * Returns a relative time string (e.g., "2 hours ago")
+ */
+export function getRelativeTimeString(dateString: string): string {
+  try {
+    const date = new Date(dateString);
+    
+    // Check if date is valid
+    if (isNaN(date.getTime())) {
+      return "Unknown date";
+    }
+    
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHour = Math.floor(diffMin / 60);
+    const diffDay = Math.floor(diffHour / 24);
+    
+    // Return appropriate time string
+    if (diffSec < 60) {
+      return "Just now";
+    } else if (diffMin < 60) {
+      return `${diffMin} ${diffMin === 1 ? 'minute' : 'minutes'} ago`;
+    } else if (diffHour < 24) {
+      return `${diffHour} ${diffHour === 1 ? 'hour' : 'hours'} ago`;
+    } else if (diffDay < 7) {
+      return `${diffDay} ${diffDay === 1 ? 'day' : 'days'} ago`;
+    } else {
+      // For older dates, return the formatted date
+      return formatDate(dateString);
+    }
+  } catch (e) {
+    console.error(`Error calculating relative time: ${dateString}`, e);
+    return "Unknown date";
+  }
+}
+
+/**
+ * Sorts an array of announcements by date (newest first)
+ */
+export function sortAnnouncementsByDate(announcements: ProcessedAnnouncement[]): ProcessedAnnouncement[] {
+  return [...announcements].sort((a, b) => {
+    // First sort by receivedAt timestamp if available (for real-time announcements)
+    if (a.receivedAt && b.receivedAt) {
+      const diff = b.receivedAt - a.receivedAt;
+      if (diff !== 0) return diff;
+    }
+    
+    // Then sort by the date field - parse dates properly
+    try {
+      const dateA = new Date(a.date).getTime();
+      const dateB = new Date(b.date).getTime();
+      
+      // Handle invalid dates
+      if (isNaN(dateA) && isNaN(dateB)) return 0;
+      if (isNaN(dateA)) return 1;
+      if (isNaN(dateB)) return -1;
+      
+      return dateB - dateA; // Newest first
+    } catch (e) {
+      console.error("Error comparing dates:", e);
+      return 0;
+    }
+  });
 }
 
 // Extract a headline from summary text
@@ -216,12 +323,16 @@ export const enhanceAnnouncementData = (announcements: ProcessedAnnouncement[]):
       sentiment = "Negative";
     }
     
+    // Format date for display
+    const displayDate = announcement.displayDate || formatDate(announcement.date);
+    
     return {
       ...announcement,
       category,
       sentiment,
       summary,
-      detailedContent
+      detailedContent,
+      displayDate
     };
   });
 };
@@ -233,8 +344,20 @@ export const processAnnouncementData = (data: any[]): ProcessedAnnouncement[] =>
   }
   
   const processedData: ProcessedAnnouncement[] = [];
+  const seenIds = new Set<string>(); // Track IDs to prevent duplicates
   
   data.forEach((item, index) => {
+    // Generate a unique ID for deduplication
+    const id = item.id || item.corp_id || item.NEWSID || `filing-${index}-${Date.now()}`;
+    
+    // Skip if we've already processed this ID
+    if (seenIds.has(id)) {
+      console.log(`Skipping duplicate announcement with ID: ${id}`);
+      return;
+    }
+    
+    seenIds.add(id);
+    
     // Extract important fields
     const isin = extractIsin(item);
     const companyName = item.companyname || item.SLONGNAME || item.NewName || item.OldName || item.Symbol || "Unknown Company";
@@ -257,14 +380,10 @@ export const processAnnouncementData = (data: any[]): ProcessedAnnouncement[] =>
     }
     
     // Get the date from available fields
-    const date = item.date || item.created_at || item.DT_TM || item.News_submission_dt || new Date().toISOString();
+    let originalDate = item.date || item.created_at || item.DT_TM || item.News_submission_dt || new Date().toISOString();
     
-    // Format date for display
-    const formattedDate = new Date(date).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    });
+    // Format date for display - handle ISO format properly
+    let formattedDate = formatDate(originalDate);
     
     // Determine sentiment based on content analysis
     let sentiment = "Neutral";
@@ -281,18 +400,19 @@ export const processAnnouncementData = (data: any[]): ProcessedAnnouncement[] =>
     }
     
     processedData.push({
-      id: item.id || item.corp_id || item.NEWSID || `filing-${index}-${Date.now()}`,
+      id: id,
       company: companyName,
       ticker: ticker,
       category: category,
       sentiment: sentiment,
-      date: formattedDate,
+      date: originalDate, // Store original date for sorting
+      displayDate: formattedDate, // Add formatted date for display
       summary: summary,
       detailedContent: summary,
       url: url,
       isin: isin,
       receivedAt: item.receivedAt || Date.now(),
-      isNew: !!item.isNew // Ensure isNew is a boolean
+      isNew: !!item.isNew || !!item.is_fresh // Ensure isNew is a boolean
     });
   });
   
@@ -301,24 +421,8 @@ export const processAnnouncementData = (data: any[]): ProcessedAnnouncement[] =>
     return generateTestData(3);
   }
   
-  // Sort by receivedAt first (for new announcements), then by date (newest first)
-  return processedData.sort((a, b) => {
-    // First sort by isNew
-    if (a.isNew && !b.isNew) return -1;
-    if (!a.isNew && b.isNew) return 1;
-    
-    // Then sort by receivedAt
-    const receivedAtA = a.receivedAt || 0;
-    const receivedAtB = b.receivedAt || 0;
-    if (receivedAtA !== receivedAtB) {
-      return receivedAtB - receivedAtA;
-    }
-    
-    // If receivedAt is the same, sort by date
-    const dateA = a.date === 'Unknown Date' ? new Date(0) : new Date(a.date);
-    const dateB = b.date === 'Unknown Date' ? new Date(0) : new Date(b.date);
-    return dateB.getTime() - dateA.getTime();
-  });
+  // Sort by date properly
+  return sortAnnouncementsByDate(processedData);
 };
 
 // Generate test data for development
@@ -336,21 +440,22 @@ const generateTestData = (count: number): ProcessedAnnouncement[] => {
     const headline = `Test Announcement ${i+1} for ${category}`;
     const summary = `**Category:** ${category}\n**Headline:** ${headline}\n\nThis is a test announcement ${i+1} for debugging purposes.`;
     
+    const now = new Date();
+    const date = new Date(now.getTime() - (i * 3600000)); // Each test item 1 hour apart
+    const isoDate = date.toISOString();
+    
     testData.push({
       id: `test-${i}-${Date.now()}`,
       company: `Test Company ${i + 1}`,
       ticker: `TC${i+1}`,
       category: categories[categoryIndex],
       sentiment: sentiments[sentimentIndex],
-      date: new Date().toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-      }),
+      date: isoDate, // Store ISO date for sorting
+      displayDate: formatDate(isoDate), // Format for display
       summary: summary,
       detailedContent: `${summary}\n\n## Additional Details\n\nThis is a detailed content for test announcement ${i+1}.`,
       isin: `TEST${i}1234567890`,
-      receivedAt: Date.now()
+      receivedAt: now.getTime() - (i * 3600000)
     });
   }
   
@@ -409,10 +514,25 @@ export const fetchAnnouncements = async (fromDate: string = '', toDate: string =
       if (a.isNew && !b.isNew) return -1;
       if (!a.isNew && b.isNew) return 1;
       
-      // Then by date (newest first)
-      const dateA = new Date(a.date).getTime();
-      const dateB = new Date(b.date).getTime();
-      return dateB - dateA;
+      // Then by receivedAt timestamp
+      if (a.receivedAt && b.receivedAt) {
+        const diff = b.receivedAt - a.receivedAt;
+        if (diff !== 0) return diff;
+      }
+      
+      // Finally by date
+      try {
+        const dateA = new Date(a.date).getTime();
+        const dateB = new Date(b.date).getTime();
+        
+        if (isNaN(dateA) || isNaN(dateB)) {
+          return 0;
+        }
+        
+        return dateB - dateA;
+      } catch (e) {
+        return 0;
+      }
     });
   } catch (error) {
     console.error("Error fetching announcements:", error);
@@ -570,7 +690,73 @@ export const searchCompanies = async (query: string, limit?: number) => {
   }
 };
 
-// Setup Socket.IO connection for real-time updates with improved error handling
+// Advanced deduplication class for tracking already processed announcements
+class AnnouncementDeduplicationCache {
+  private idSet = new Set<string>();
+  private contentHashSet = new Set<string>();
+  private maxSize: number;
+
+  constructor(maxSize = 1000) {
+    this.maxSize = maxSize;
+  }
+
+  private generateContentHash(announcement: ProcessedAnnouncement): string {
+    // Create a unique identifier based on content
+    const contentParts = [
+      announcement.company,
+      announcement.summary?.substring(0, 100),
+      announcement.date
+    ].filter(Boolean);
+    
+    return contentParts.join('||');
+  }
+
+  public has(announcement: ProcessedAnnouncement): boolean {
+    // Check by ID
+    if (this.idSet.has(announcement.id)) {
+      return true;
+    }
+    
+    // Check by content hash
+    const contentHash = this.generateContentHash(announcement);
+    return this.contentHashSet.has(contentHash);
+  }
+
+  public add(announcement: ProcessedAnnouncement): void {
+    // Add by ID
+    this.idSet.add(announcement.id);
+    
+    // Add by content hash
+    const contentHash = this.generateContentHash(announcement);
+    this.contentHashSet.add(contentHash);
+    
+    // Prune if needed
+    this.prune();
+  }
+
+  private prune(): void {
+    // If we exceed max size, remove oldest entries
+    // Since Sets don't have a built-in way to remove oldest entries,
+    // we'll just clear half the cache if it gets too big
+    if (this.idSet.size > this.maxSize) {
+      const idArray = Array.from(this.idSet);
+      const contentHashArray = Array.from(this.contentHashSet);
+      
+      // Keep the most recent half
+      const keepCount = Math.floor(this.maxSize / 2);
+      
+      this.idSet = new Set(idArray.slice(-keepCount));
+      this.contentHashSet = new Set(contentHashArray.slice(-keepCount));
+    }
+  }
+
+  public clear(): void {
+    this.idSet.clear();
+    this.contentHashSet.clear();
+  }
+}
+
+// Socket.IO connection for real-time updates
 export const setupSocketConnection = (onNewAnnouncement: (data: any) => void) => {
   // Determine the correct WebSocket URL based on environment
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -593,9 +779,14 @@ export const setupSocketConnection = (onNewAnnouncement: (data: any) => void) =>
     transports: ['websocket', 'polling']
   });
 
+  // Create deduplication cache
+  const deduplicationCache = new AnnouncementDeduplicationCache();
+
   // Connection event handlers
   socket.on('connect', () => {
     console.log('Connected to WebSocket server for real-time announcements');
+    // Reset the deduplication cache on new connection
+    deduplicationCache.clear();
     // Dispatch custom event
     window.dispatchEvent(new Event('socket:connect'));
   });
@@ -622,19 +813,40 @@ export const setupSocketConnection = (onNewAnnouncement: (data: any) => void) =>
     console.log(`Socket reconnection attempt #${attemptNumber}`);
   });
 
-  // Listen for new announcements with improved error handling
+  // Listen for new announcements with improved deduplication
   socket.on('new_announcement', (data) => {
     console.log('Received new announcement via socket:', data);
     
     try {
-      // Pass the raw announcement data to the callback
-      onNewAnnouncement(data);
+      // Basic validation
+      if (!data) {
+        console.warn("Received empty announcement data");
+        return;
+      }
+      
+      // Process the announcement
+      const processed = processAnnouncementData([data])[0];
+      
+      // Check for duplicates using our cache
+      if (deduplicationCache.has(processed)) {
+        console.log(`Skipping duplicate announcement: ${processed.id}`);
+        return;
+      }
+      
+      // Add to deduplication cache
+      deduplicationCache.add(processed);
+      
+      // Mark as new for highlighting
+      processed.isNew = true;
+      
+      // Pass the processed announcement to callback
+      onNewAnnouncement(processed);
       
       // Also dispatch a custom event
-      const announcementEvent = new CustomEvent('new:announcement', { detail: data });
+      const announcementEvent = new CustomEvent('new:announcement', { detail: processed });
       window.dispatchEvent(announcementEvent);
     } catch (error) {
-      console.error('Error processing announcement:', error);
+      console.error('Error processing socket announcement:', error);
     }
   });
 

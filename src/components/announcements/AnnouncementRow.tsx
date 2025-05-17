@@ -1,4 +1,4 @@
-// Enhanced AnnouncementRow component with better animation and highlighting
+// src/components/announcements/AnnouncementRow.tsx - Updated for better handling of new announcements
 
 import React, { useEffect, useState, useRef } from 'react';
 import { Star, StarOff, Bell } from 'lucide-react';
@@ -13,7 +13,7 @@ interface AnnouncementRowProps {
   onClick: (announcement: ProcessedAnnouncement) => void;
   onCompanyClick: (company: string, e: React.MouseEvent) => void;
   isNew?: boolean;
-  onMarkAsRead?: (id: string) => void; // Flag to indicate if this is a new announcement from socket
+  onMarkAsRead?: (id: string) => void;
 }
 
 const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
@@ -23,7 +23,8 @@ const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
   onSave,
   onClick,
   onCompanyClick,
-  isNew = false
+  isNew = false,
+  onMarkAsRead
 }) => {
   // State to manage animation and highlighting
   const [isHighlighted, setIsHighlighted] = useState(isNew);
@@ -38,10 +39,12 @@ const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
       // Set both highlight and animation
       setIsHighlighted(true);
       setIsAnimating(true);
+      setIsPulsing(true);
       
-      // After 500ms, stop the pulse animation but keep the highlight
+      // After 5 seconds, stop the pulse animation but keep the highlight
       const animationTimer = setTimeout(() => {
         setIsAnimating(false);
+        setIsPulsing(false);
       }, 5000);
       
       // After 30 seconds, remove the highlight
@@ -49,7 +52,7 @@ const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
         setIsHighlighted(false);
       }, 30000);
       
-      // Optional: scroll into view if new
+      // Scroll into view if new
       if (rowRef.current) {
         rowRef.current.scrollIntoView({ 
           behavior: 'smooth', 
@@ -69,38 +72,18 @@ const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
     if (isNew) {
       setIsHighlighted(true);
       setIsAnimating(true);
-      
-      const animationTimer = setTimeout(() => {
-        setIsAnimating(false);
-      }, 5000);
-      
-      return () => clearTimeout(animationTimer);
-    }
-  }, [isNew]);
-
-  useEffect(() => {
-    // Update highlight state when isNew changes
-    setIsHighlighted(isNew);
-    
-    if (isNew) {
-      // Start pulsing animation
       setIsPulsing(true);
       
-      // Stop pulsing after 5 seconds but keep highlight
-      if (transitionTimeoutRef.current) {
-        clearTimeout(transitionTimeoutRef.current);
+      // Try to scroll into view when new arrives
+      if (rowRef.current) {
+        setTimeout(() => {
+          rowRef.current?.scrollIntoView({ 
+            behavior: 'smooth', 
+            block: 'center'
+          });
+        }, 100);
       }
-      
-      transitionTimeoutRef.current = setTimeout(() => {
-        setIsPulsing(false);
-      }, 5000);
     }
-    
-    return () => {
-      if (transitionTimeoutRef.current) {
-        clearTimeout(transitionTimeoutRef.current);
-      }
-    };
   }, [isNew]);
 
   const handleRowClick = () => {
@@ -115,8 +98,8 @@ const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
     // Clear highlight state
     setIsHighlighted(false);
     setIsPulsing(false);
+    setIsAnimating(false);
   };
-  
 
   // Company display values
   const companyDisplayName = announcement.company || "Unknown Company";
@@ -126,22 +109,26 @@ const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
   const categoryToDisplay = announcement.category || 'Other';
   const headlineToDisplay = extractHeadline(announcement.summary);
 
+  // Use the displayDate if available
+  const dateToDisplay = announcement.displayDate || announcement.date;
+
   // Custom CSS for animation
   const animationClass = isAnimating ? 'animate-pulse-slow' : '';
   const highlightClass = isHighlighted ? 'bg-blue-50' : '';
   const viewedClass = isViewed && !isHighlighted ? 'text-gray-600' : 'text-gray-800';
+  const pulsingClass = isPulsing ? 'badge-pulse' : '';
 
   return (
     <div
       ref={rowRef}
-      className={`grid grid-cols-12 px-6 py-4 hover:bg-gray-50/80 cursor-pointer transition-all duration-200 items-center ${viewedClass} ${highlightClass} ${animationClass}`}
-      onClick={() => onClick(announcement)}
+      className={`grid grid-cols-12 px-6 py-4 hover:bg-gray-50/80 cursor-pointer transition-all duration-200 items-center ${viewedClass} ${highlightClass} ${animationClass} announcement-row-transition`}
+      onClick={handleRowClick}
       data-announcement-id={announcement.id}
       data-is-new={isNew ? 'true' : 'false'}
     >
       {/* Indicator dot for unread or new announcements */}
       {(!isViewed || isHighlighted) && (
-        <div className={`absolute left-1 w-1 h-1 rounded-full ${isHighlighted ? 'bg-blue-500' : 'bg-green-500'}`}></div>
+        <div className={`absolute left-1 w-1 h-1 rounded-full ${isHighlighted ? 'bg-blue-500' : 'bg-green-500'} ${pulsingClass}`}></div>
       )}
 
       {/* Company information */}
@@ -192,6 +179,7 @@ const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
 
       {/* Save button */}
       <div className="col-span-1 flex items-center justify-end">
+        <div className="text-xs text-gray-400 mr-3">{dateToDisplay}</div>
         <button
           className="text-gray-400 hover:text-gray-900 p-1.5 rounded-full hover:bg-gray-100/80 transition-colors"
           onClick={(e) => {
@@ -226,9 +214,60 @@ const AnimationStyles = () => (
       animation: pulse-slow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
     }
     
+    /* Badge pulse animation */
+    @keyframes badge-pulse {
+      0%, 100% {
+        opacity: 1;
+        transform: scale(1);
+      }
+      50% {
+        opacity: 0.6;
+        transform: scale(1.2);
+      }
+    }
+    
+    .badge-pulse {
+      animation: badge-pulse 1.5s infinite ease-in-out;
+    }
+    
     /* Transition for non-animating elements */
     .bg-blue-50 {
       transition: background-color 0.5s ease-in-out;
+    }
+    
+    /* New announcement indicator flash */
+    @keyframes flash {
+      0% {
+        background-color: rgba(219, 234, 254, 0.9);
+      }
+      100% {
+        background-color: transparent;
+      }
+    }
+    
+    .flash-animation {
+      animation: flash 1.5s ease-out;
+    }
+    
+    /* Smooth transition for all row changes */
+    .announcement-row-transition {
+      transition: background-color 0.5s ease-out, color 0.3s ease-out, transform 0.3s ease-out;
+    }
+    
+    /* Special animation for newly arrived announcements */
+    .announcement-row-new-arrival {
+      animation: slideDown 0.5s ease-out forwards;
+    }
+    
+    @keyframes slideDown {
+      from {
+        opacity: 0;
+        transform: translateY(-20px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
     }
   `}</style>
 );

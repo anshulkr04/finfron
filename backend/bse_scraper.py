@@ -11,9 +11,10 @@ from supabase import create_client, Client
 from urllib.parse import urlparse
 import tempfile
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 import traceback
+import hashlib
 
 # Configure logging
 logging.basicConfig(
@@ -318,6 +319,10 @@ class BseScraper:
         self.max_retries = max_retries
         self.request_timeout = request_timeout
         self.temp_dir = tempfile.mkdtemp(prefix="bse_scraper_")
+        
+        # Add the announcement cache
+        self.announcement_cache = AnnouncementCache()
+        
         logger.info(f"Created temporary directory: {self.temp_dir}")
 
     def __del__(self):
@@ -590,7 +595,6 @@ Dont start with something like intro like "Okay here is the summary". You should
         return "N/A"
 
     def process_data(self, announcement):
-        """Process a single announcement with comprehensive error handling"""
         try:
             # Extract and validate announcement data
             scrip_id = announcement.get("SCRIP_CD")
@@ -612,13 +616,20 @@ Dont start with something like intro like "Okay here is the summary". You should
             if scrip_id == 1:
                 logger.info("Skipping announcement with scrip_id 1")
                 return False
-                
+            
+            # Check if this announcement has already been processed
+            # This requires implementing a method to check if an announcement is a duplicate
+            if hasattr(self, 'announcement_cache') and hasattr(self.announcement_cache, 'contains'):
+                if self.announcement_cache.contains(announcement):
+                    logger.info(f"Skipping duplicate announcement: {bse_summary}")
+                    return False
+                    
             # Format company name if needed
             if isinstance(company_name, str) and company_name.endswith(" LTD"):
                 company_name = company_name[:-4]
             
             # Extract symbol from URL
-            symbol = extract_symbol(company_url)
+            symbol = extract_symbol(company_url) if company_url else ""
             if symbol:
                 symbol = symbol.upper()
             else:
@@ -633,9 +644,10 @@ Dont start with something like intro like "Okay here is the summary". You should
             elif check_for_pdf(pdf_file):
                 logger.info(f"Processing PDF: {pdf_file}")
                 category, ai_summary = self.process_pdf(pdf_file) 
-                ai_summary = remove_markdown_tags(ai_summary)
-                ai_summary = clean_summary(ai_summary)
-            
+                if ai_summary:
+                    ai_summary = remove_markdown_tags(ai_summary)
+                    ai_summary = clean_summary(ai_summary)
+                
             # Get ISIN
             isin = self.get_isin(scrip_id)
             
@@ -643,12 +655,12 @@ Dont start with something like intro like "Okay here is the summary". You should
             if not isin or isin == "N/A" or (len(isin) > 3 and isin[2] != "E"):
                 logger.warning(f"Invalid ISIN: {isin} for scrip_id {scrip_id}")
                 return False
-                
+                    
             # Create file URL
             file_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{pdf_file}" if pdf_file else None
             
             # Prepare data for upload
-            data = {
+            processed_data = {
                 "corp_id": str(uuid.uuid4()),
                 "securityid": scrip_id,
                 "summary": bse_summary,
@@ -661,37 +673,55 @@ Dont start with something like intro like "Okay here is the summary". You should
                 "symbol": symbol
             }
             
-            # Upload to Supabase with retries
-            for attempt in range(1, self.max_retries + 1):
-                try:
-                    response = supabase.table("corporatefilings").insert(data).execute()
-                    # logger.info(f"Data uploaded to Supabase for {scrip_id}")
-                    # latest_ann = load_latest_announcement()
-                    # lat_date = latest_ann.get("News_submission_dt", "")
-                    # now_date = date.fromisoformat(date)
-                    # lat_date = date.fromisoformat(lat_date)
-                    # if lat_date < now_date:
-                    #     logger.info(f"New announcement detected: {bse_summary}")
-                    post_url = "http://localhost:5001/api/insert_new_announcement"
-                    res = requests.post(url=post_url, json=data)
-                    #     save_success = save_latest_announcement(announcement)
-                    #     if not save_success:
-                    #         logger.error("Failed to save the latest announcement")
-                    
-                    # return True 
-                except Exception as e:
-                    logger.error(f"Error uploading to Supabase (attempt {attempt}/{self.max_retries}): {e}")
-                    
-                    if attempt < self.max_retries:
-                        wait_time = 2 ** attempt
-                        logger.info(f"Retrying upload in {wait_time} seconds...")
-                        time.sleep(wait_time)
-                    else:
-                        logger.error(f"Failed to upload after {self.max_retries} attempts")
-                        return False
-                        
+            # Determine if we should broadcast this announcement
+            # This requires implementing the should_broadcast method
+            should_broadcast = False
+            if hasattr(self, 'should_broadcast'):
+                should_broadcast = self.should_broadcast(announcement)
+                
+            success = False
+            if should_broadcast:
+                # Send for database storage AND WebSocket broadcast
+                if hasattr(self, 'broadcast_announcement'):
+                    logger.info(f"Broadcasting new announcement: {bse_summary}")
+                    success = self.broadcast_announcement(processed_data)
+                else:
+                    # Fallback to original behavior if method not available
+                    logger.info(f"Broadcast method not available, using insert_new_announcement directly")
+                    try:
+                        post_url = "http://localhost:5001/api/insert_new_announcement"
+                        # Add fresh flag
+                        processed_data['is_fresh'] = True 
+                        processed_data['broadcast'] = True
+                        res = requests.post(url=post_url, json=processed_data)
+                        success = res.status_code == 200
+                    except Exception as e:
+                        logger.error(f"Error sending announcement: {str(e)}")
+                        success = False
+            else:
+                # Send for database storage only
+                if hasattr(self, 'save_to_database'):
+                    logger.info(f"Saving announcement to database (no broadcast): {bse_summary}")
+                    success = self.save_to_database(processed_data)
+                else:
+                    # Fall back to supabase direct insert if method not available
+                    logger.info(f"Save method not available, using direct Supabase insert")
+                    try:
+                        response = supabase.table("corporatefilings").insert(processed_data).execute()
+                        success = True
+                    except Exception as e:
+                        logger.error(f"Error saving to database: {str(e)}")
+                        success = False
+            
+            # Add to cache to prevent duplicate processing
+            if success and hasattr(self, 'announcement_cache') and hasattr(self.announcement_cache, 'add'):
+                self.announcement_cache.add(announcement)
+                
+            return success
+                
         except Exception as e:
-            logger.error(f"Unexpected error processing announcement: {e}")
+            logger.error(f"Unexpected error processing announcement: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
 
     def run(self):
@@ -808,6 +838,267 @@ Dont start with something like intro like "Okay here is the summary". You should
                 logger.info(f"Waiting {check_interval} seconds before retry...")
                 time.sleep(check_interval)
 
+    # Add these methods to your existing BseScraper class
+
+    def is_first_run(self):
+        """Check if this is the first run by looking for a flag file"""
+        flag_file_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 
+            "data", 
+            "first_run_flag.txt"
+        )
+        return os.path.exists(flag_file_path)
+
+    def should_broadcast(self, announcement):
+        """
+        Determine if an announcement should be broadcast via WebSocket
+        
+        An announcement should only be broadcast if:
+        1. It's not the first run after server start (prevents flooding)
+        2. It's a recent announcement (within threshold)
+        3. It hasn't been processed before
+        """
+        # Skip broadcasting on first run to prevent flooding
+        if self.is_first_run():
+            return False
+            
+        # If it's a duplicate, don't broadcast
+        if self.announcement_cache.contains(announcement):
+            return False
+            
+        # Check if the announcement is recent
+        if 'News_submission_dt' in announcement:
+            try:
+                # Parse the announcement date
+                date_str = announcement['News_submission_dt']
+                # Try different date formats
+                try:
+                    # Try ISO format
+                    announcement_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                except (ValueError, TypeError):
+                    try:
+                        # Try other common formats
+                        announcement_date = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
+                    except ValueError:
+                        try:
+                            # Try BSE format
+                            announcement_date = datetime.strptime(date_str, '%d-%m-%Y %H:%M:%S')
+                        except ValueError:
+                            logger.warning(f"Could not parse date: {date_str}")
+                            announcement_date = None
+                
+                if announcement_date:
+                    current_time = datetime.now()
+                    # Only broadcast if it's within the threshold (2 hours)
+                    threshold = timedelta(hours=2)
+                    is_recent = (current_time - announcement_date) <= threshold
+                    return is_recent
+            except Exception as e:
+                logger.error(f"Error checking announcement date: {str(e)}")
+        
+        return False  # Conservative default - don't broadcast if we can't confirm it's new
+
+    def save_to_database(self, processed_data):
+        """
+        Save announcement to Supabase database without WebSocket broadcast
+        
+        This is for announcements that should be stored but not broadcast as new.
+        """
+        try:
+            # First check if it already exists in the database
+            if "corp_id" in processed_data:
+                try:
+                    response = supabase.table("corporatefilings").select("corp_id").eq("corp_id", processed_data["corp_id"]).execute()
+                    if response.data and len(response.data) > 0:
+                        logger.info(f"Announcement already exists in database with corp_id {processed_data['corp_id']}")
+                        return True
+                except Exception as e:
+                    logger.warning(f"Error checking if announcement exists: {str(e)}")
+            
+            # Endpoint for database-only operations (no WebSocket)
+            endpoint = "http://localhost:5001/api/save_announcement"
+            
+            # Send the announcement to the backend
+            response = requests.post(
+                endpoint,
+                json=processed_data,
+                headers={'Content-Type': 'application/json'},
+                timeout=30  # 30 second timeout
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"Saved to database (no broadcast): {processed_data.get('companyname', 'Unknown')}")
+                return True
+            else:
+                logger.warning(f"Failed to save announcement to database: {response.status_code} - {response.text}")
+                
+                # Try direct supabase insert as fallback
+                try:
+                    supabase.table("corporatefilings").insert(processed_data).execute()
+                    logger.info("Fallback: Directly inserted into Supabase")
+                    return True
+                except Exception as e:
+                    logger.error(f"Fallback insertion failed: {str(e)}")
+                    return False
+        except Exception as e:
+            logger.error(f"Error saving announcement to database: {str(e)}")
+            return False
+
+    def broadcast_announcement(self, processed_data):
+        """
+        Send announcement to backend for database storage AND WebSocket broadcast
+        
+        This is for truly new announcements that should be broadcast to users.
+        """
+        try:
+            # Add flags to indicate this should be broadcast
+            processed_data['is_fresh'] = True
+            processed_data['broadcast'] = True
+            
+            # Endpoint for WebSocket broadcast
+            endpoint = "http://localhost:5001/api/insert_new_announcement"
+            
+            # Send the announcement to the backend
+            response = requests.post(
+                endpoint,
+                json=processed_data,
+                headers={'Content-Type': 'application/json'},
+                timeout=30  # 30 second timeout
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"Broadcast announcement: {processed_data.get('companyname', 'Unknown')}")
+                return True
+            else:
+                logger.warning(f"Failed to broadcast announcement: {response.status_code} - {response.text}")
+                
+                # Try direct supabase insert as fallback
+                try:
+                    supabase.table("corporatefilings").insert(processed_data).execute()
+                    logger.info("Fallback: Saved to database but could not broadcast")
+                    return False
+                except Exception as e:
+                    logger.error(f"Fallback insertion failed: {str(e)}")
+                    return False
+        except Exception as e:
+            logger.error(f"Error broadcasting announcement: {str(e)}")
+            return False
+
+# Add this class to your bse_scraper.py file
+
+class AnnouncementCache:
+    """Simple cache to avoid processing duplicate announcements"""
+    
+    def __init__(self, max_size=5000):
+        self.id_cache = set()  # Store announcement IDs
+        self.content_hash_cache = set()  # Store content hashes
+        self.max_size = max_size
+        
+        # Create data dir if it doesn't exist
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.data_dir = os.path.join(script_dir, "data")
+        os.makedirs(self.data_dir, exist_ok=True)
+        
+        # Cache file path
+        self.cache_file = os.path.join(self.data_dir, "announcement_cache.json")
+        
+        # Load cache from file if it exists
+        self.load_cache()
+    
+    def _generate_content_hash(self, announcement):
+        """Generate a hash based on announcement content"""
+        if not isinstance(announcement, dict):
+            return None
+            
+        hash_parts = []
+        
+        # Use multiple fields to create a content hash
+        key_fields = ["SCRIP_CD", "HEADLINE", "News_submission_dt", "SLONGNAME", "ATTACHMENTNAME"]
+        for field in key_fields:
+            if field in announcement and announcement[field]:
+                hash_parts.append(f"{field}:{announcement[field]}")
+        
+        if not hash_parts:
+            return None
+            
+        # Create a string to hash
+        content_string = "||".join(hash_parts)
+        return hashlib.md5(content_string.encode()).hexdigest()
+    
+    def contains(self, announcement):
+        """Check if announcement is in cache"""
+        if not isinstance(announcement, dict):
+            return False
+            
+        # Check by ID if available
+        announcement_id = announcement.get("NEWSID")
+        if announcement_id and announcement_id in self.id_cache:
+            return True
+            
+        # Check by content hash
+        content_hash = self._generate_content_hash(announcement)
+        if content_hash and content_hash in self.content_hash_cache:
+            return True
+            
+        return False
+    
+    def add(self, announcement):
+        """Add announcement to cache"""
+        if not isinstance(announcement, dict):
+            return
+            
+        # Add ID to cache if available
+        announcement_id = announcement.get("NEWSID")
+        if announcement_id:
+            self.id_cache.add(announcement_id)
+            
+        # Add content hash to cache
+        content_hash = self._generate_content_hash(announcement)
+        if content_hash:
+            self.content_hash_cache.add(content_hash)
+            
+        # Save cache periodically
+        if len(self.id_cache) % 10 == 0:
+            self.save_cache()
+    
+    def load_cache(self):
+        """Load cache from file"""
+        try:
+            if os.path.exists(self.cache_file):
+                with open(self.cache_file, 'r') as f:
+                    cache_data = json.load(f)
+                    self.id_cache = set(cache_data.get('id_cache', []))
+                    self.content_hash_cache = set(cache_data.get('content_hash_cache', []))
+                logger.info(f"Loaded cache with {len(self.id_cache)} IDs and {len(self.content_hash_cache)} content hashes")
+        except Exception as e:
+            logger.error(f"Error loading cache: {str(e)}")
+    
+    def save_cache(self):
+        """Save cache to file"""
+        try:
+            # Prune if needed
+            self._prune_cache()
+            
+            cache_data = {
+                'id_cache': list(self.id_cache),
+                'content_hash_cache': list(self.content_hash_cache),
+                'updated_at': datetime.now().isoformat()
+            }
+            
+            with open(self.cache_file, 'w') as f:
+                json.dump(cache_data, f)
+                
+            logger.debug(f"Saved cache with {len(self.id_cache)} entries")
+        except Exception as e:
+            logger.error(f"Error saving cache: {str(e)}")
+    
+    def _prune_cache(self):
+        """Remove oldest entries if cache exceeds max size"""
+        if len(self.id_cache) > self.max_size:
+            # Simple approach - just clear half the cache
+            logger.info(f"Pruning cache from {len(self.id_cache)} entries to {self.max_size//2}")
+            self.id_cache = set(list(self.id_cache)[-self.max_size//2:])
+            self.content_hash_cache = set(list(self.content_hash_cache)[-self.max_size//2:])
 
 if __name__ == "__main__":
     today = datetime.today().strftime('%Y%m%d')

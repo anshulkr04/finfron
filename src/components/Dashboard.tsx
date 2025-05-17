@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Search, Calendar, Filter, RefreshCw, AlertTriangle, Star, StarOff, Bell } from 'lucide-react';
-import { fetchAnnouncements, ProcessedAnnouncement, Company, searchCompanies } from '../api';
+import { fetchAnnouncements, ProcessedAnnouncement, Company, searchCompanies, sortAnnouncementsByDate, formatDate } from '../api';
 import MainLayout from './layout/MainLayout';
 import MetricsPanel from './common/MetricsPanel';
 import DetailPanel from './announcements/DetailPanel';
@@ -13,6 +13,7 @@ import AnnouncementRow from './announcements/AnnouncementRow';
 import { useSocket } from '../context/SocketContext';
 import SocketStatusIndicator from './common/SocketStatusIndicator';
 import { toast } from 'react-hot-toast';
+import NewAnnouncementIndicator from './common/NewAnnouncementIndicator';
 
 // Define an interface for the API search results
 interface CompanySearchResult {
@@ -52,7 +53,7 @@ const Dashboard: React.FC<DashboardProps> = ({
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [viewedAnnouncements, setViewedAnnouncements] = useState<string[]>([]);
-  const [NewAnnouncements, setNewAnnouncements] = useState<ProcessedAnnouncement[]>([]);
+  const [localNewAnnouncements, setLocalNewAnnouncements] = useState<ProcessedAnnouncement[]>([]);
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [filterType, setFilterType] = useState<'all' | 'company' | 'category'>('all');
   const [showNewIndicator, setShowNewIndicator] = useState(false);
@@ -69,6 +70,7 @@ const Dashboard: React.FC<DashboardProps> = ({
   const initialLoadComplete = useRef(false);
   const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const loadingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const processedAnnouncementIds = useRef<Set<string>>(new Set());
   
   // Access socket context
   const socketContext = useSocket();
@@ -107,22 +109,17 @@ const Dashboard: React.FC<DashboardProps> = ({
           receivedAt: Date.now() // Add timestamp
         });
         console.log(`Added new announcement: ${incoming.id} - ${incoming.company}`);
+        
+        // Add to processed IDs set
+        processedAnnouncementIds.current.add(incoming.id);
       }
     });
     
-    // Convert map back to array and sort by date (newest first)
-    const mergedAnnouncements = Array.from(existingMap.values()).sort((a, b) => {
-      // Use receivedAt timestamp for sorting if available
-      const dateA = a.receivedAt || new Date(a.date).getTime();
-      const dateB = b.receivedAt || new Date(b.date).getTime();
-      return dateB - dateA;
-    });
-    
-    return mergedAnnouncements;
+    // Convert map back to array and sort by date
+    return sortAnnouncementsByDate(Array.from(existingMap.values()));
   }, []);
 
-  
-
+  // Handle marking announcements as read
   const markAnnouncementAsRead = useCallback((id: string) => {
     // Update the viewed announcements list
     if (!viewedAnnouncements.includes(id)) {
@@ -131,8 +128,8 @@ const Dashboard: React.FC<DashboardProps> = ({
       localStorage.setItem('viewedAnnouncements', JSON.stringify(updatedViewed));
     }
     
-    // Also update the newAnnouncements state by removing this announcement
-    setNewAnnouncements(prev => prev.filter(a => a.id !== id));
+    // Update the newAnnouncements state by removing this announcement
+    setLocalNewAnnouncements(prev => prev.filter(a => a.id !== id));
     
     // Update the main announcements list to remove the isNew flag
     setAnnouncements(prev => prev.map(announcement => 
@@ -140,8 +137,9 @@ const Dashboard: React.FC<DashboardProps> = ({
         ? { ...announcement, isNew: false } 
         : announcement
     ));
-  }, [viewedAnnouncements, setNewAnnouncements]);
+  }, [viewedAnnouncements]);
 
+  // Handle announcement click
   const handleAnnouncementClick = (announcement: ProcessedAnnouncement) => {
     // Mark as viewed when clicked
     markAnnouncementAsRead(announcement.id);
@@ -150,13 +148,27 @@ const Dashboard: React.FC<DashboardProps> = ({
     setSelectedDetail(announcement);
   };
   
-  // Handle new announcements from socket (coming from App component)
+  // Handle new announcements from parent App component
   useEffect(() => {
     if (newAnnouncements && newAnnouncements.length > 0) {
       console.log(`Dashboard received ${newAnnouncements.length} new announcements from App`);
       
-      // Merge with existing announcements, ensuring no duplicates and proper ordering
+      // Merge with existing announcements
       setAnnouncements(prev => mergeNewAnnouncements(prev, newAnnouncements));
+      
+      // Update local new announcements count
+      const newIds = new Set(newAnnouncements.map(a => a.id));
+      setLocalNewAnnouncements(prev => {
+        // Remove announcements that are no longer marked as new
+        const filtered = prev.filter(a => a.isNew);
+        
+        // Add new announcements that we haven't processed yet
+        const newOnes = newAnnouncements.filter(a => 
+          !prev.some(p => p.id === a.id) && a.isNew
+        );
+        
+        return [...filtered, ...newOnes];
+      });
       
       // Show the new indicator
       setShowNewIndicator(true);
@@ -165,6 +177,57 @@ const Dashboard: React.FC<DashboardProps> = ({
       setCurrentPage(1);
     }
   }, [newAnnouncements, mergeNewAnnouncements]);
+  
+  // Listen directly for new announcements from the socket via custom event
+  useEffect(() => {
+    const handleNewAnnouncementEvent = (event: CustomEvent) => {
+      if (event.detail) {
+        const newAnnouncement = event.detail as ProcessedAnnouncement;
+        console.log("Dashboard received new announcement from custom event:", newAnnouncement);
+        
+        // Check if we've already processed this announcement
+        if (processedAnnouncementIds.current.has(newAnnouncement.id)) {
+          console.log(`Already processed announcement ${newAnnouncement.id}, skipping`);
+          return;
+        }
+        
+        // Add to processed IDs
+        processedAnnouncementIds.current.add(newAnnouncement.id);
+        
+        // Update the announcements list
+        setAnnouncements(prev => {
+          // Skip if already in the list
+          if (prev.some(a => a.id === newAnnouncement.id)) {
+            return prev;
+          }
+          
+          // Add to the beginning and re-sort
+          const updated = [newAnnouncement, ...prev];
+          return sortAnnouncementsByDate(updated);
+        });
+        
+        // Also update the newAnnouncements state
+        setLocalNewAnnouncements(prev => {
+          // Skip if already in the list
+          if (prev.some(a => a.id === newAnnouncement.id)) {
+            return prev;
+          }
+          
+          return [newAnnouncement, ...prev];
+        });
+        
+        // Show the indicator
+        setShowNewIndicator(true);
+      }
+    };
+    
+    // Listen for the custom event
+    window.addEventListener('new-announcement-received', handleNewAnnouncementEvent as EventListener);
+    
+    return () => {
+      window.removeEventListener('new-announcement-received', handleNewAnnouncementEvent as EventListener);
+    };
+  }, []);
   
   // Load viewed announcements from localStorage on mount
   useEffect(() => {
@@ -245,9 +308,14 @@ const Dashboard: React.FC<DashboardProps> = ({
       
       console.log(`Received ${data.length} announcements from API`);
       
+      // Add all IDs to processed set
+      data.forEach(announcement => {
+        processedAnnouncementIds.current.add(announcement.id);
+      });
+      
       // Merge with any new announcements we've received via socket
-      if (newAnnouncements && newAnnouncements.length > 0) {
-        const mergedData = mergeNewAnnouncements(data, newAnnouncements);
+      if (localNewAnnouncements && localNewAnnouncements.length > 0) {
+        const mergedData = mergeNewAnnouncements(data, localNewAnnouncements);
         setAnnouncements(mergedData);
       } else {
         setAnnouncements(data);
@@ -274,7 +342,7 @@ const Dashboard: React.FC<DashboardProps> = ({
       setIsLoading(false);
       setIsRetrying(false);
     }
-  }, [filters.dateRange, filters.selectedIndustries, mergeNewAnnouncements, newAnnouncements]);
+  }, [filters.dateRange, filters.selectedIndustries, mergeNewAnnouncements, localNewAnnouncements]);
   
   // Generate test data as fallback
   const generateTestData = (count: number): ProcessedAnnouncement[] => {
@@ -291,17 +359,17 @@ const Dashboard: React.FC<DashboardProps> = ({
       const headline = `Test Announcement ${i+1} for ${category}`;
       const summary = `**Category:** ${category}\n**Headline:** ${headline}\n\nThis is a test announcement ${i+1} for debugging purposes.`;
       
+      const now = new Date();
+      const date = new Date(now.getTime() - (i * 3600000)); // Each test item 1 hour apart
+      
       testData.push({
         id: `test-${i}-${Date.now()}`,
         company: `Test Company ${i + 1}`,
         ticker: `TC${i+1}`,
         category: categories[categoryIndex],
         sentiment: sentiments[sentimentIndex],
-        date: new Date().toLocaleDateString('en-US', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
-        }),
+        date: date.toISOString(),
+        displayDate: formatDate(date.toISOString()),
         summary: summary,
         detailedContent: `${summary}\n\n## Additional Details\n\nThis is a detailed content for test announcement ${i+1}.`,
         isin: `TEST${i}1234567890`
@@ -388,6 +456,26 @@ const Dashboard: React.FC<DashboardProps> = ({
         });
       }
       
+      // Join symbol/ticker-specific rooms from announcements
+      const tickers = announcements
+        .map(a => a.ticker)
+        .filter(Boolean)
+        .filter((ticker, index, self) => self.indexOf(ticker) === index);
+        
+      tickers.forEach(ticker => {
+        if (ticker) socketContext.joinRoom(ticker);
+      });
+      
+      // Join ISIN-specific rooms from announcements
+      const isins = announcements
+        .map(a => a.isin)
+        .filter(Boolean)
+        .filter((isin, index, self) => self.indexOf(isin) === index);
+        
+      isins.forEach(isin => {
+        if (isin) socketContext.joinRoom(isin);
+      });
+      
       // Clean up function to leave rooms when component unmounts or filters change
       return () => {
         socketContext.leaveRoom('all');
@@ -405,6 +493,14 @@ const Dashboard: React.FC<DashboardProps> = ({
             socketContext.leaveRoom(`category:${category}`);
           });
         }
+        
+        tickers.forEach(ticker => {
+          if (ticker) socketContext.leaveRoom(ticker);
+        });
+        
+        isins.forEach(isin => {
+          if (isin) socketContext.leaveRoom(isin);
+        });
       };
     }
   }, [
@@ -412,7 +508,8 @@ const Dashboard: React.FC<DashboardProps> = ({
     socketContext?.isConnected, 
     filters.selectedCompany,
     filters.selectedIndustries,
-    filters.selectedCategories
+    filters.selectedCategories,
+    announcements // Add this dependency to update rooms when announcements change
   ]);
   
   // Handle search input changes with debouncing
@@ -556,16 +653,6 @@ const Dashboard: React.FC<DashboardProps> = ({
     setSelectedIndustries([]);
     setSelectedCompany(null);
   };
-  
-  // Handle announcement click - mark it as viewed
-  // const handleAnnouncementClick = (announcement: ProcessedAnnouncement) => {
-  //   if (!viewedAnnouncements.includes(announcement.id)) {
-  //     const updatedViewed = [...viewedAnnouncements, announcement.id];
-  //     setViewedAnnouncements(updatedViewed);
-  //     localStorage.setItem('viewedAnnouncements', JSON.stringify(updatedViewed));
-  //   }
-  //   setSelectedDetail(announcement);
-  // };
   
   // Handle company name click to navigate to company page
   const handleCompanyClick = (company: string, e: React.MouseEvent) => {
@@ -750,10 +837,10 @@ const Dashboard: React.FC<DashboardProps> = ({
         <div className="mr-6 text-sm font-medium">
           Filtered Announcements: {filteredAnnouncements.length}
         </div>
-        {newAnnouncements.length > 0 && (
+        {localNewAnnouncements.length > 0 && (
           <div className="flex items-center text-sm font-medium text-blue-600">
             <div className="w-1.5 h-1.5 bg-blue-500 rounded-full mr-2 badge-pulse"></div>
-            {newAnnouncements.length} new update{newAnnouncements.length !== 1 ? 's' : ''}
+            {localNewAnnouncements.length} new update{localNewAnnouncements.length !== 1 ? 's' : ''}
           </div>
         )}
       </div>
@@ -868,7 +955,7 @@ const Dashboard: React.FC<DashboardProps> = ({
             </div>
             <div className="col-span-5">Summary</div>
             <div className="col-span-1 text-center">Status</div>
-            <div className="col-span-1 text-right">Save</div>
+            <div className="col-span-1 text-right">Actions</div>
           </div>
           
           {/* Table content - scrollable area */}
@@ -913,8 +1000,8 @@ const Dashboard: React.FC<DashboardProps> = ({
                   isViewed={viewedAnnouncements.includes(announcement.id)}
                   onSave={toggleSavedFiling}
                   onClick={handleAnnouncementClick}
-                  onCompanyClick={(company, e) => handleCompanyClick(company, e)}
-                  isNew={newAnnouncements.some(a => a.id === announcement.id)}
+                  onCompanyClick={handleCompanyClick}
+                  isNew={localNewAnnouncements.some(a => a.id === announcement.id)}
                   onMarkAsRead={markAnnouncementAsRead}
                 />
               ))
@@ -990,17 +1077,17 @@ const Dashboard: React.FC<DashboardProps> = ({
       )}
       
       {/* New announcements floating indicator */}
-      {showNewIndicator && newAnnouncements.length > 0 && (
+      {showNewIndicator && localNewAnnouncements.length > 0 && (
         <div className="fixed bottom-6 right-6 z-50 scale-in-animation">
           <button
             className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-full shadow-lg flex items-center transition-colors"
             onClick={handleScrollToNew}
-            aria-label={`${newAnnouncements.length} new announcements, click to view`}
+            aria-label={`${localNewAnnouncements.length} new announcements, click to view`}
           >
             <span className="badge-pulse mr-2 flex items-center justify-center">
               <Bell size={16} />
             </span>
-            <span className="font-medium mr-1">{newAnnouncements.length} new announcement{newAnnouncements.length !== 1 ? 's' : ''}</span>
+            <span className="font-medium mr-1">{localNewAnnouncements.length} new announcement{localNewAnnouncements.length !== 1 ? 's' : ''}</span>
             <span className="ml-1">↑</span>
           </button>
         </div>

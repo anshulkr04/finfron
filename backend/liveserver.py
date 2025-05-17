@@ -979,9 +979,186 @@ def test_corporate_filings():
         'note': 'This is test data from the test endpoint'
     }), 200
 
+# @# Add this to the top of your liveserver.py file, after the existing imports
+
+# Advanced in-memory cache for deduplication
+class AnnouncementCache:
+    """Cache to prevent duplicate announcement processing"""
+    def __init__(self, max_size=1000):
+        self.cache = {}  # Main cache
+        self.cache_by_content = {}  # Secondary cache using content hash
+        self.max_size = max_size
+        self.access_order = []  # For LRU eviction
+
+    def _generate_content_hash(self, data):
+        """Create a hash from announcement content for deduplication"""
+        # Use multiple fields to generate a more robust hash
+        hash_fields = []
+        
+        # Try different field combinations
+        if 'companyname' in data and 'summary' in data:
+            hash_fields.append(f"{data['companyname']}:{data['summary'][:100]}")
+        
+        if 'company' in data and 'summary' in data:
+            hash_fields.append(f"{data['company']}:{data['summary'][:100]}")
+            
+        if 'Symbol' in data and 'summary' in data:
+            hash_fields.append(f"{data['Symbol']}:{data['summary'][:100]}")
+            
+        if 'symbol' in data and 'summary' in data:
+            hash_fields.append(f"{data['symbol']}:{data['summary'][:100]}")
+        
+        if 'ai_summary' in data:
+            hash_fields.append(data['ai_summary'][:100])
+            
+        # Fallback if none of the above are present
+        if not hash_fields:
+            # Use whatever we can find as a hash source
+            for key in ['headline', 'title', 'description', 'text']:
+                if key in data and data[key]:
+                    hash_fields.append(str(data[key])[:100])
+                    break
+            
+            # Last resort
+            if not hash_fields:
+                return None
+        
+        # Create a hash from the combined fields
+        hash_source = "||".join(hash_fields)
+        return hashlib.md5(hash_source.encode()).hexdigest()
+
+    def _update_access(self, key):
+        """Update the access order for LRU eviction"""
+        if key in self.access_order:
+            self.access_order.remove(key)
+        self.access_order.append(key)
+        
+        # Evict oldest if cache exceeds max size
+        while len(self.cache) > self.max_size:
+            oldest_key = self.access_order.pop(0)
+            content_hash = self.cache.get(oldest_key, {}).get('content_hash')
+            if content_hash and content_hash in self.cache_by_content:
+                del self.cache_by_content[content_hash]
+            if oldest_key in self.cache:
+                del self.cache[oldest_key]
+
+    def contains(self, data):
+        """Check if announcement is already in cache"""
+        # Check by ID
+        announcement_id = data.get('id') or data.get('corp_id')
+        if announcement_id and announcement_id in self.cache:
+            self._update_access(announcement_id)
+            return True
+            
+        # Check by content hash
+        content_hash = self._generate_content_hash(data)
+        if content_hash and content_hash in self.cache_by_content:
+            self._update_access(content_hash)
+            return True
+            
+        return False
+
+    def add(self, data):
+        """Add announcement to cache"""
+        announcement_id = data.get('id') or data.get('corp_id')
+        if not announcement_id:
+            # Generate an ID if none exists
+            announcement_id = f"generated-{datetime.datetime.now().timestamp()}"
+        
+        # Generate content hash
+        content_hash = self._generate_content_hash(data)
+        
+        # Store metadata
+        timestamp = datetime.datetime.now().isoformat()
+        
+        # Store in primary cache
+        self.cache[announcement_id] = {
+            'timestamp': timestamp,
+            'content_hash': content_hash
+        }
+        
+        # Store in content hash cache if available
+        if content_hash:
+            self.cache_by_content[content_hash] = {
+                'id': announcement_id,
+                'timestamp': timestamp
+            }
+        
+        self._update_access(announcement_id)
+        
+        return announcement_id
+
+# Initialize the cache
+announcement_cache = AnnouncementCache(max_size=5000)
+
+# Then replace your insert_new_announcement function with this improved version:
+
+@app.route('/api/save_announcement', methods=['POST', 'OPTIONS'])
+def save_announcement():
+    """Endpoint to save announcements to the database without WebSocket broadcast"""
+    if request.method == 'OPTIONS':
+        return _handle_options()
+        
+    try:
+        data = request.get_json()
+        
+        if not data:
+            logger.warning("Received empty announcement data")
+            return jsonify({'message': 'Missing data!', 'status': 'error'}), 400
+        
+        # Add timestamp if not present
+        if 'timestamp' not in data:
+            data['timestamp'] = datetime.datetime.now().isoformat()
+        
+        # Add a unique ID if not present
+        if 'id' not in data and 'corp_id' not in data:
+            data['id'] = f"announcement-{datetime.datetime.now().timestamp()}"
+            
+        # Log the save operation
+        logger.info(f"Saving announcement to database (no broadcast): {data.get('companyname', 'Unknown')}: {data.get('summary', '')[:100]}...")
+        
+        # Save to database if we have Supabase connection
+        if supabase_connected:
+            try:
+                # Check if the announcement already exists
+                search_id = data.get('id') or data.get('corp_id')
+                exists = False
+                
+                if search_id:
+                    response = supabase.table('corporatefilings').select('id').eq('id', search_id).execute()
+                    exists = response.data and len(response.data) > 0
+                
+                if not exists:
+                    # Insert into database
+                    supabase.table('corporatefilings').insert(data).execute()
+                    logger.debug(f"Announcement saved to database with ID: {search_id}")
+                else:
+                    logger.debug(f"Announcement already exists in database, skipping insert: {search_id}")
+                    
+                return jsonify({
+                    'message': 'Announcement saved to database successfully',
+                    'status': 'success',
+                    'is_new': False,
+                    'exists': exists
+                }), 200
+                
+            except Exception as e:
+                logger.error(f"Database error saving announcement: {str(e)}")
+                return jsonify({'message': f'Database error: {str(e)}', 'status': 'error'}), 500
+        else:
+            logger.warning("Supabase not connected, announcement not saved to database")
+            return jsonify({'message': 'Database not connected', 'status': 'error'}), 503
+            
+    except Exception as e:
+        # Log the full error trace for debugging
+        logger.error(f"Error saving announcement: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'message': f'Error saving announcement: {str(e)}', 'status': 'error'}), 500
+
+# Now update the insert_new_announcement endpoint to be clearer about its dual purpose
 @app.route('/api/insert_new_announcement', methods=['POST', 'OPTIONS'])
 def insert_new_announcement():
-    """Endpoint to receive new announcements from the scraper for websocket streaming"""
+    """Endpoint to save announcements to database AND broadcast via WebSocket"""
     if request.method == 'OPTIONS':
         return _handle_options()
         
@@ -1000,48 +1177,88 @@ def insert_new_announcement():
         if 'id' not in data and 'corp_id' not in data:
             data['id'] = f"announcement-{datetime.datetime.now().timestamp()}"
         
-        # Log announcement
-        logger.info(f"Received new announcement: {data.get('companyname', 'Unknown')}: {data.get('summary', '')[:100]}...")
+        # Generate a deduplication hash for frontend
+        dedup_hash = hashlib.md5(f"{data.get('companyname', '')}-{data.get('summary', '')[:100]}".encode()).hexdigest()
+        data['dedup_id'] = dedup_hash
         
-        # Broadcast to all clients
-        socketio.emit('new_announcement', data)
-        logger.info("Broadcasted announcement to all clients")
+        # Check if the announcement exists in the database
+        announcement_exists = False
+        if supabase_connected:
+            try:
+                search_id = data.get('id') or data.get('corp_id')
+                if search_id:
+                    response = supabase.table('corporatefilings').select('id').eq('id', search_id).execute()
+                    announcement_exists = response.data and len(response.data) > 0
+            except Exception as e:
+                logger.warning(f"Error checking database for existing announcement: {str(e)}")
         
-        # Broadcast to specific rooms
-        rooms = ['all']  # Always broadcast to 'all' room
+        # First, save to database regardless of whether it's broadcast
+        if supabase_connected and not announcement_exists:
+            try:
+                supabase.table('corporatefilings').insert(data).execute()
+                logger.debug(f"Announcement saved to database: {data.get('id') or data.get('corp_id')}")
+            except Exception as e:
+                logger.error(f"Error saving to database: {str(e)}")
+        elif announcement_exists:
+            logger.debug(f"Announcement already exists in database, skipping insert")
         
-        # ISIN-specific room
-        if 'isin' in data and data['isin']:
-            isin_room = data['isin']
-            socketio.emit('new_announcement', data, room=isin_room)
-            rooms.append(isin_room)
+        # Now handle broadcasting via WebSocket
+        # Only broadcast if it's explicitly marked for broadcast or has is_fresh flag
+        should_broadcast = data.get('broadcast', False) or data.get('is_fresh', False)
         
-        # Symbol/ticker-specific room
-        if 'symbol' in data and data['symbol']:
-            symbol_room = data['symbol']
-            socketio.emit('new_announcement', data, room=symbol_room)
-            rooms.append(symbol_room)
+        if should_broadcast:
+            # Log announcement
+            logger.info(f"Broadcasting announcement: {data.get('companyname', 'Unknown')}: {data.get('summary', '')[:100]}...")
             
-        # Company-specific room
-        if 'companyname' in data and data['companyname']:
-            company_room = f"company:{data['companyname']}"
-            socketio.emit('new_announcement', data, room=company_room)
-            rooms.append(company_room)
+            # Broadcast to all clients
+            socketio.emit('new_announcement', data)
             
-        # Category-specific room
-        if 'category' in data and data['category']:
-            category_room = f"category:{data['category']}"
-            socketio.emit('new_announcement', data, room=category_room)
-            rooms.append(category_room)
-        
-        logger.info(f"Announcement also broadcast to specific rooms: {', '.join(rooms)}")
-        
-        return jsonify({
-            'message': 'Announcement received and broadcasted successfully!',
-            'status': 'success',
-            'rooms': rooms
-        }), 200
-        
+            # Broadcast to specific rooms
+            rooms = ['all']  # Always broadcast to 'all' room
+            
+            # ISIN-specific room
+            if 'isin' in data and data['isin']:
+                isin_room = data['isin']
+                socketio.emit('new_announcement', data, room=isin_room)
+                rooms.append(isin_room)
+            
+            # Symbol/ticker-specific room
+            if 'symbol' in data and data['symbol']:
+                symbol_room = data['symbol']
+                socketio.emit('new_announcement', data, room=symbol_room)
+                rooms.append(symbol_room)
+                
+            # Company-specific room
+            if 'companyname' in data and data['companyname']:
+                company_room = f"company:{data['companyname']}"
+                socketio.emit('new_announcement', data, room=company_room)
+                rooms.append(company_room)
+                
+            # Category-specific room
+            if 'category' in data and data['category']:
+                category_room = f"category:{data['category']}"
+                socketio.emit('new_announcement', data, room=category_room)
+                rooms.append(category_room)
+            
+            logger.info(f"Announcement broadcast to rooms: {', '.join(rooms)}")
+            
+            return jsonify({
+                'message': 'Announcement saved to database and broadcast via WebSocket',
+                'status': 'success',
+                'rooms': rooms,
+                'is_new': True,
+                'broadcast': True
+            }), 200
+        else:
+            # If not broadcasting, just report successful database save
+            logger.info(f"Announcement saved to database (no broadcast): {data.get('companyname', 'Unknown')}")
+            return jsonify({
+                'message': 'Announcement saved to database (no broadcast)',
+                'status': 'success',
+                'is_new': False, 
+                'broadcast': False
+            }), 200
+            
     except Exception as e:
         # Log the full error trace for debugging
         logger.error(f"Error processing announcement: {str(e)}")
@@ -1176,6 +1393,9 @@ def list_users():
         return jsonify({'message': f'Failed to list users: {str(e)}'}), 500
 
 # Function to start the BSE scraper
+# Function to start the BSE scraper
+# Add this function to your liveserver.py file to fix the error
+
 def start_scraper():
     """Start the BSE scraper in a separate thread with better error handling"""
     try:
@@ -1198,20 +1418,31 @@ def start_scraper():
         today = datetime.datetime.today().strftime('%Y%m%d')
         
         try:
-            # Try to create the scraper instance but don't call run_continuous
-            # This avoids the threading lock issue
+            # Create a flag file to signal that this is the first run
+            first_run_flag_path = Path(__file__).parent / "data" / "first_run_flag.txt"
+            os.makedirs(os.path.dirname(first_run_flag_path), exist_ok=True)
+            
+            # Mark as first run by creating the flag file
+            with open(first_run_flag_path, 'w') as f:
+                f.write(f"First run on {datetime.datetime.now().isoformat()}")
+            
+            logger.info("Created first run flag file")
+                
+            # Initialize the scraper
             scraper = scraper_module.BseScraper(today, today)
             
-            # Instead of using the scraper's continuous method, 
-            # we'll implement our own polling mechanism 
-            logger.info("BSE scraper initialized, running in polling mode")
-            
-            # First run - execute immediately
+            # First run - this will use the flag file internally
             try:
-                scraper.run()  # Just run once
+                scraper.run()  # No parameter passed here
                 logger.info("Initial scraper run completed")
             except Exception as e:
                 logger.error(f"Error in initial scraper run: {str(e)}")
+                logger.error(traceback.format_exc())
+            
+            # Remove the first run flag file
+            if os.path.exists(first_run_flag_path):
+                os.remove(first_run_flag_path)
+                logger.info("Removed first run flag file")
             
             # Then poll periodically
             check_interval = 10  # seconds
@@ -1226,17 +1457,22 @@ def start_scraper():
                     
                     # Create a new scraper instance each time to avoid state issues
                     scraper = scraper_module.BseScraper(current_day, current_day)
+                    
+                    # Run the scraper (after the first run)
                     scraper.run()
                     
                 except Exception as e:
                     logger.error(f"Error in periodic scraper run: {str(e)}")
+                    logger.error(traceback.format_exc())
                     # Continue the loop even after errors
             
         except Exception as e:
             logger.error(f"Error creating scraper instance: {str(e)}")
+            logger.error(traceback.format_exc())
             
     except Exception as e:
         logger.error(f"Error importing scraper module: {str(e)}")
+        logger.error(traceback.format_exc())
 
 # Custom error handlers
 @app.errorhandler(404)

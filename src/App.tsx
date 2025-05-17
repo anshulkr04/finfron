@@ -15,6 +15,7 @@ import { Company, ProcessedAnnouncement, enhanceAnnouncementData } from './api';
 import { SocketProvider } from './context/SocketContext';
 import { useAuth } from './context/AuthContext';
 import { toast, Toaster } from 'react-hot-toast';
+import NotificationIndicator from './components/common/NotificationIndicator';
 
 // Inner component with enhanced socket handling
 const AppWithSocket = () => {
@@ -27,10 +28,18 @@ const AppWithSocket = () => {
   const processedAnnouncementIds = useRef<Set<string>>(new Set());
 
   // Navigation handlers
-  const handleViewAnnouncements = (company: Company) => {
-    setSelectedCompany(company);
-    setActivePage('company');
+  // Handle scrolling to new announcements
+  const handleViewNewAnnouncements = () => {
+    // Reset to first page
+    setCurrentPage(1);
+    
+    // Scroll to top where new announcements are displayed
+    window.scrollTo({
+      top: 0,
+      behavior: 'smooth'
+    });
   };
+  
 
   const handleNavigate = (page: 'home' | 'watchlist' | 'company', params?: { watchlistId?: string }) => {
     if (page === 'home') {
@@ -214,6 +223,9 @@ const AppWithSocket = () => {
               {/* Fallback route */}
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+            <NotificationIndicator 
+              onViewNewAnnouncements={handleViewNewAnnouncements}
+            />
           </WatchlistProvider>
         </FilterProvider>
       </Router>
