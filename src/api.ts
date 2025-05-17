@@ -478,39 +478,67 @@ export const searchCompanies = async (query: string, limit?: number) => {
 };
 
 // Setup Socket.IO connection for real-time updates
+// Add this to the end of your api.ts file (before the export default)
+
 import { io, Socket } from 'socket.io-client';
 
-// Other existing code...
-
-// Replace the existing setupSocketConnection function with this one
+// Setup Socket.IO connection for real-time updates
 export const setupSocketConnection = (onNewAnnouncement: (data: any) => void) => {
-  // Create socket connection
+  // Create socket connection with proper configuration
   const socket: Socket = io('/', {
     // Use the same path as your server
     path: '/socket.io',
     // Automatically reconnect if connection is lost
     reconnection: true,
     reconnectionAttempts: 5,
-    reconnectionDelay: 1000
+    reconnectionDelay: 1000,
+    // Additional options for better connection stability
+    timeout: 10000
   });
 
   // Connection event handlers
   socket.on('connect', () => {
-    console.log('Connected to WebSocket server');
+    console.log('Connected to WebSocket server for real-time announcements');
   });
 
-  socket.on('disconnect', () => {
-    console.log('Disconnected from WebSocket server');
+  socket.on('disconnect', (reason) => {
+    console.log('Disconnected from WebSocket server:', reason);
+    
+    // If the server disconnected us, try to reconnect
+    if (reason === 'io server disconnect') {
+      socket.connect();
+    }
+  });
+
+  socket.on('connect_error', (error) => {
+    console.error('Socket connection error:', error);
+  });
+
+  socket.on('reconnect', (attemptNumber) => {
+    console.log(`Socket reconnected after ${attemptNumber} attempts`);
+  });
+
+  socket.on('reconnect_attempt', (attemptNumber) => {
+    console.log(`Socket reconnection attempt #${attemptNumber}`);
   });
 
   socket.on('error', (error) => {
-    console.error('Socket connection error:', error);
+    console.error('Socket error:', error);
   });
 
   // Listen for new announcements
   socket.on('new_announcement', (data) => {
-    console.log('Received new announcement:', data);
-    onNewAnnouncement(data);
+    console.log('Received new announcement via socket:', data);
+    
+    // Process the raw announcement data before passing it to the callback
+    // This allows us to format it consistently with the rest of the app
+    const processedData = processAnnouncementData([data])[0];
+    
+    // Apply the enhancement function to standardize the announcement format
+    const enhancedData = enhanceAnnouncementData([processedData])[0];
+    
+    // Pass the processed announcement to the callback
+    onNewAnnouncement(enhancedData);
   });
 
   // Listen for status updates
@@ -522,14 +550,25 @@ export const setupSocketConnection = (onNewAnnouncement: (data: any) => void) =>
   return {
     // Join a room to receive updates about specific companies or ISINs
     joinRoom: (room: string) => {
-      console.log(`Joining room: ${room}`);
-      socket.emit('join', { room });
+      if (socket.connected) {
+        console.log(`Joining room: ${room}`);
+        socket.emit('join', { room });
+      } else {
+        console.warn(`Cannot join room ${room}: Socket not connected`);
+        // Queue this request for when the connection is established
+        socket.on('connect', () => {
+          console.log(`Socket connected, now joining room: ${room}`);
+          socket.emit('join', { room });
+        });
+      }
     },
     
     // Leave a room to stop receiving updates about specific companies or ISINs
     leaveRoom: (room: string) => {
-      console.log(`Leaving room: ${room}`);
-      socket.emit('leave', { room });
+      if (socket.connected) {
+        console.log(`Leaving room: ${room}`);
+        socket.emit('leave', { room });
+      }
     },
     
     // Disconnect the socket when no longer needed
@@ -539,5 +578,4 @@ export const setupSocketConnection = (onNewAnnouncement: (data: any) => void) =>
     }
   };
 };
-
 export default apiClient;

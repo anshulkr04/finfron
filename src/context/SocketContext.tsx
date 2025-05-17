@@ -1,7 +1,6 @@
-// src/contexts/SocketContext.tsx
+// src/context/SocketContext.tsx
 import React, { createContext, useEffect, useState, ReactNode } from 'react';
-import { setupSocketConnection, ProcessedAnnouncement } from '../api';
-import { enhanceAnnouncementData } from '../api'; // Import this if available
+import { setupSocketConnection, ProcessedAnnouncement, enhanceAnnouncementData } from '../api';
 
 // Define the shape of our context
 type SocketContextType = {
@@ -30,7 +29,7 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
   useEffect(() => {
     // Process a new announcement when it comes in
     const processNewAnnouncement = (data: any) => {
-      console.log("Received new announcement:", data);
+      console.log("Received new announcement via socket:", data);
       
       // Process the announcement data to match your application's format
       const processedAnnouncement: ProcessedAnnouncement = {
@@ -66,7 +65,7 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
     setSocket(socketConnection);
     setIsConnected(true);
     
-    console.log("Socket connection established");
+    console.log("Socket connection established for real-time announcements");
 
     // Clean up on unmount
     return () => {
@@ -80,12 +79,16 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
   // Provide the socket functions and state to consumers
   const contextValue = {
     joinRoom: (room: string) => {
-      console.log(`Joining room: ${room}`);
-      socket?.joinRoom(room);
+      if (socket && isConnected) {
+        console.log(`Joining room: ${room}`);
+        socket.joinRoom(room);
+      }
     },
     leaveRoom: (room: string) => {
-      console.log(`Leaving room: ${room}`);
-      socket?.leaveRoom(room);
+      if (socket && isConnected) {
+        console.log(`Leaving room: ${room}`);
+        socket.leaveRoom(room);
+      }
     },
     newAnnouncement,
     isConnected

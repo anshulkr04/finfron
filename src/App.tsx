@@ -9,9 +9,9 @@ import { WatchlistProvider } from './context/WatchlistContext';
 import { FilterProvider } from './context/FilterContext';
 import { AuthProvider } from './context/AuthContext';
 import { Company, ProcessedAnnouncement } from './api';
-import { SocketProvider } from './context/SocketContext'; // Import the SocketProvider
-import { useAuth } from './context/AuthContext'; // Import useAuth if available
-import { toast } from 'react-hot-toast'; // Add toast notifications (install if not already: npm install react-hot-toast)
+import { SocketProvider } from './context/SocketContext';
+import { useAuth } from './context/AuthContext';
+import { toast, Toaster } from 'react-hot-toast';
 
 // Inner component to access auth context
 const AppWithSocket = () => {
@@ -19,8 +19,8 @@ const AppWithSocket = () => {
   const [selectedCompany, setSelectedCompany] = useState<Company | null>(null);
   const [watchlistParams, setWatchlistParams] = useState<{ watchlistId?: string }>({});
   const [newAnnouncements, setNewAnnouncements] = useState<ProcessedAnnouncement[]>([]);
-  const { user } = useAuth(); // Get auth state if available
-  const isAuthenticated = !!user; // Derive authentication state from user object
+  const { user } = useAuth();
+  const isAuthenticated = !!user;
 
   const handleViewAnnouncements = (company: Company) => {
     setSelectedCompany(company);
@@ -48,9 +48,16 @@ const AppWithSocket = () => {
 
   // Handle new announcements from socket
   const handleNewAnnouncement = (announcement: ProcessedAnnouncement) => {
-    setNewAnnouncements(prev => [announcement, ...prev]);
+    console.log('New announcement received:', announcement);
     
-    // Show a toast notification
+    // Add to our state while preventing duplicates
+    setNewAnnouncements(prev => {
+      const isDuplicate = prev.some(a => a.id === announcement.id);
+      if (isDuplicate) return prev;
+      return [announcement, ...prev];
+    });
+    
+    // Show a toast notification with company info and summary
     toast.success(
       <div>
         <p className="font-medium">{announcement.company}</p>
@@ -93,14 +100,14 @@ const AppWithSocket = () => {
                     <Dashboard 
                       onNavigate={handleNavigate} 
                       onCompanySelect={handleCompanyClick}
-                      newAnnouncements={newAnnouncements} // Pass the new announcements
+                      newAnnouncements={newAnnouncements}
                     />
                   ) : activePage === 'watchlist' ? (
                     <WatchlistPage 
                       onViewAnnouncements={handleViewAnnouncements} 
                       onNavigate={handleNavigate} 
                       watchlistParams={watchlistParams}
-                      newAnnouncements={newAnnouncements} // Pass new announcements
+                      newAnnouncements={newAnnouncements}
                     />
                   ) : (
                     selectedCompany && (
@@ -108,7 +115,11 @@ const AppWithSocket = () => {
                         company={selectedCompany} 
                         onNavigate={handleNavigate}
                         onBack={() => setActivePage('dashboard')} 
-                        newAnnouncements={newAnnouncements} // Pass new announcements
+                        newAnnouncements={newAnnouncements.filter(
+                          a => a.company === selectedCompany.name || 
+                               a.isin === selectedCompany.isin ||
+                               a.ticker === selectedCompany.symbol
+                        )} // Filter announcements relevant to this company
                       />
                     )
                   )}
@@ -121,6 +132,8 @@ const AppWithSocket = () => {
           </WatchlistProvider>
         </FilterProvider>
       </Router>
+      {/* Toast container for notifications */}
+      <Toaster />
     </SocketProvider>
   );
 };

@@ -2,7 +2,7 @@ import React, { useEffect, useContext } from 'react';
 import { Star, StarOff } from 'lucide-react';
 import { ProcessedAnnouncement } from '../../api';
 import { extractHeadline } from '../../utils/apiUtils';
-import { SocketContext } from '../../context/SocketContext'; // We'll create this context
+import { SocketContext } from '../../context/SocketContext';
 
 interface AnnouncementRowProps {
   announcement: ProcessedAnnouncement;
@@ -24,33 +24,34 @@ const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
   isNew = false
 }) => {
   // Get socket connection from context
-  const socketConnection = useContext(SocketContext);
+  const socketContext = useContext(SocketContext);
   
   // Subscribe to company-specific updates when component mounts
   useEffect(() => {
-    // Only subscribe if we have a valid ticker or ISIN
-    if (announcement.ticker) {
-      socketConnection?.joinRoom(announcement.ticker);
-    }
-    
-    if (announcement.isin) {
-      socketConnection?.joinRoom(announcement.isin);
-    }
-    
-    // Cleanup on unmount
-    return () => {
+    // Only subscribe if we have a valid ticker or ISIN and socket is connected
+    if (socketContext && socketContext.isConnected) {
       if (announcement.ticker) {
-        socketConnection?.leaveRoom(announcement.ticker);
+        socketContext.joinRoom(announcement.ticker);
       }
       
       if (announcement.isin) {
-        socketConnection?.leaveRoom(announcement.isin);
+        socketContext.joinRoom(announcement.isin);
       }
-    };
-  }, [announcement.ticker, announcement.isin, socketConnection]);
+      
+      // Cleanup on unmount
+      return () => {
+        if (announcement.ticker) {
+          socketContext.leaveRoom(announcement.ticker);
+        }
+        
+        if (announcement.isin) {
+          socketContext.leaveRoom(announcement.isin);
+        }
+      };
+    }
+  }, [announcement.ticker, announcement.isin, socketContext]);
 
-  // No longer need state variables or useEffect for company lookups
-  // Just use the company name and ticker directly from the announcement
+  // Company display values
   const companyDisplayName = announcement.company || "Unknown Company";
   const companyDisplaySymbol = announcement.ticker || "";
 
@@ -60,27 +61,28 @@ const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
   return (
     <div
       className={`grid grid-cols-12 px-6 py-4 hover:bg-gray-50/80 cursor-pointer transition-all duration-200 items-center ${
-        isViewed
+        isViewed && !isNew
           ? 'announcement-row-viewed text-gray-600'
           : 'announcement-row-unread text-gray-800'
       } ${isNew ? 'animate-pulse-slow bg-blue-50' : ''}`}
       onClick={() => onClick(announcement)}
     >
       {(!isViewed || isNew) && (
-        <div className={`unread-badge ${isNew ? 'bg-blue-500' : ''}`}>
-          {isNew ? 'LIVE' : 'NEW'}
-        </div>
+        <div className={`absolute left-1 w-1 h-1 rounded-full ${isNew ? 'bg-blue-500' : 'bg-green-500'}`}></div>
       )}
 
       <div className="col-span-3 pr-4">
         <div
-          className={`font-medium company-name truncate inline-block relative group`}
+          className={`font-medium company-name truncate inline-block relative group ${isNew ? 'text-blue-700' : ''}`}
           onClick={(e) => onCompanyClick(companyDisplayName, e)}
         >
           {companyDisplayName}
           <span className="absolute bottom-0 left-0 w-0 h-0.5 bg-black/80 transition-all duration-300 ease-in-out group-hover:w-full opacity-80"></span>
         </div>
-        <div className="text-xs text-gray-500 mt-1 truncate">{companyDisplaySymbol}</div>
+        <div className="text-xs text-gray-500 mt-1 truncate flex items-center">
+          {companyDisplaySymbol}
+          {isNew && <span className="ml-2 text-xs font-medium text-blue-600 bg-blue-100 px-1.5 py-0.5 rounded-full">LIVE</span>}
+        </div>
       </div>
 
       <div className="col-span-2">
@@ -94,7 +96,7 @@ const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
       <div className="col-span-5 text-sm pr-4">
         <div className={`summary-text line-clamp-2 leading-relaxed overflow-hidden ${
           isViewed && !isNew ? 'text-gray-500' : 'text-gray-700'
-        }`}>
+        } ${isNew ? 'font-medium' : ''}`}>
           {headlineToDisplay}
         </div>
       </div>

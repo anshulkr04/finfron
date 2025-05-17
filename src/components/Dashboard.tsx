@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useContext } from 'react';
 import { Search, Calendar as CalendarIcon, Filter as FilterIcon } from 'lucide-react';
 import { fetchAnnouncements, ProcessedAnnouncement, Company, searchCompanies } from '../api';
 import MainLayout from './layout/MainLayout';
@@ -10,6 +10,8 @@ import { useFilters } from '../context/FilterContext';
 import { Star, StarOff } from 'lucide-react';
 import { extractHeadline } from '../utils/apiUtils';
 import AnnouncementRow from './announcements/AnnouncementRow';
+import { SocketContext } from '../context/SocketContext';
+import { toast } from 'react-hot-toast';
 
 // Define an interface for the API search results
 interface CompanySearchResult {
@@ -24,11 +26,12 @@ interface CompanySearchResult {
 interface DashboardProps {
   onNavigate: (page: 'home' | 'watchlist' | 'company') => void;
   onCompanySelect: (company: Company) => void;
+  newAnnouncements?: ProcessedAnnouncement[]; // New prop to receive announcements from App
 }
 
 const ITEMS_PER_PAGE = 15; // Number of announcements per page
 
-const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect }) => {
+const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect, newAnnouncements = [] }) => {
   // State management
   const [announcements, setAnnouncements] = useState<ProcessedAnnouncement[]>([]);
   const [filteredAnnouncements, setFilteredAnnouncements] = useState<ProcessedAnnouncement[]>([]);
@@ -41,6 +44,9 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect }) =>
   const [viewedAnnouncements, setViewedAnnouncements] = useState<string[]>([]);
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [filterType, setFilterType] = useState<'all' | 'company' | 'category'>('all');
+  
+  // Access socket context
+  const socketContext = useContext(SocketContext);
   
   // Search-specific state
   const [searchResults, setSearchResults] = useState<CompanySearchResult[]>([]);
@@ -57,6 +63,22 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect }) =>
     setSelectedSentiments,
     setSelectedIndustries
   } = useFilters();
+  
+  // Handle new announcements from socket
+  useEffect(() => {
+    if (newAnnouncements && newAnnouncements.length > 0) {
+      // Merge with existing announcements, ensuring no duplicates by ID
+      setAnnouncements(prev => {
+        const existingIds = new Set(prev.map(a => a.id));
+        const uniqueNewAnnouncements = newAnnouncements.filter(a => !existingIds.has(a.id));
+        
+        if (uniqueNewAnnouncements.length === 0) return prev;
+        
+        // Add new announcements at the beginning of the list
+        return [...uniqueNewAnnouncements, ...prev];
+      });
+    }
+  }, [newAnnouncements]);
   
   // Fetch data from API with improved date handling
   useEffect(() => {
@@ -77,8 +99,16 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect }) =>
         
         console.log(`Received ${data.length} announcements from API`);
         
-        setAnnouncements(data);
-        setFilteredAnnouncements(data);
+        // Merge with any new announcements we've received via socket
+        if (newAnnouncements && newAnnouncements.length > 0) {
+          const existingIds = new Set(data.map(a => a.id));
+          const uniqueNewAnnouncements = newAnnouncements.filter(a => !existingIds.has(a.id));
+          
+          setAnnouncements([...uniqueNewAnnouncements, ...data]);
+        } else {
+          setAnnouncements(data);
+        }
+        
         // Reset to first page when data changes
         setCurrentPage(1);
       } catch (err) {
@@ -91,45 +121,6 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect }) =>
     
     loadAnnouncements();
   }, [filters.dateRange, filters.selectedIndustries]);
-  
-  // Real-time company search with API integration
-  useEffect(() => {
-    if (filters.searchTerm.length < 2) {
-      setSearchResults([]);
-      return;
-    }
-    
-    const searchTimer = setTimeout(async () => {
-      setIsSearchLoading(true);
-      try {
-        const results = await searchCompanies(filters.searchTerm, 10);
-        setSearchResults(results);
-        if (results.length > 0) {
-          setShowSearchResults(true);
-        }
-      } catch (error) {
-        console.error('Error searching companies:', error);
-      } finally {
-        setIsSearchLoading(false);
-      }
-    }, 300); // 300ms debounce
-    
-    return () => clearTimeout(searchTimer);
-  }, [filters.searchTerm]);
-  
-  // Handle click outside to close search results
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (searchRef.current && !searchRef.current.contains(event.target as Node)) {
-        setShowSearchResults(false);
-      }
-    };
-    
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, []);
   
   // Apply additional filters
   useEffect(() => {
@@ -194,6 +185,31 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect }) =>
   useEffect(() => {
     localStorage.setItem('savedFilings', JSON.stringify(savedFilings));
   }, [savedFilings]);
+  
+  // Join relevant rooms based on filters when socket is connected
+  useEffect(() => {
+    if (socketContext && socketContext.isConnected) {
+      // Join rooms for watched companies
+      if (filters.selectedCompany) {
+        socketContext.joinRoom(filters.selectedCompany);
+      }
+      
+      // Join specific industry or category rooms if we want to track these
+      if (filters.selectedIndustries.length === 1) {
+        socketContext.joinRoom(filters.selectedIndustries[0]);
+      }
+      
+      return () => {
+        // Leave rooms when component unmounts or filters change
+        if (filters.selectedCompany) {
+          socketContext.leaveRoom(filters.selectedCompany);
+        }
+        if (filters.selectedIndustries.length === 1) {
+          socketContext.leaveRoom(filters.selectedIndustries[0]);
+        }
+      };
+    }
+  }, [socketContext, filters.selectedCompany, filters.selectedIndustries]);
   
   // Handle search result selection
   const handleSearchSelect = (companyData: CompanySearchResult) => {
@@ -266,12 +282,6 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect }) =>
       type === 'start' ? value : filters.dateRange.start,
       type === 'end' ? value : filters.dateRange.end
     );
-    
-    // Log the updated date range for debugging
-    console.log("Updated date range:", {
-      start: type === 'start' ? value : filters.dateRange.start,
-      end: type === 'end' ? value : filters.dateRange.end
-    });
   };
   
   const resetFilters = () => {
@@ -436,6 +446,12 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect }) =>
               <div className="w-2 h-2 bg-green-500 rounded-full mr-1.5"></div>
               <span className="text-xs font-medium text-gray-700">AI-Powered</span>
             </div>
+            {socketContext?.isConnected && (
+              <div className="ml-3 flex items-center">
+                <div className="w-2 h-2 bg-blue-500 rounded-full mr-1.5 animate-pulse"></div>
+                <span className="text-xs font-medium text-gray-700">Live Updates</span>
+              </div>
+            )}
           </div>
           
           <div className="flex items-center">
@@ -444,7 +460,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect }) =>
             </div>
             <div className="flex items-center text-sm font-medium text-gray-700">
               <div className="w-1.5 h-1.5 bg-green-500 rounded-full mr-2 animate-pulse"></div>
-              Updates every 15 minutes
+              Real-time updates
             </div>
           </div>
         </div>
@@ -579,6 +595,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onCompanySelect }) =>
                   onSave={toggleSavedFiling}
                   onClick={handleAnnouncementClick}
                   onCompanyClick={(company, e) => handleCompanyClick(company, e)}
+                  isNew={newAnnouncements.some(a => a.id === announcement.id)}
                 />
               ))
             )}
