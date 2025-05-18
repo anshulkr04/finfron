@@ -2,6 +2,7 @@
 
 import axios from 'axios';
 import { io, Socket } from 'socket.io-client';
+import { sortByNewestDate } from './utils/dateUtils';
 
 // Determine the correct API base URL based on environment
 const getBaseUrl = () => {
@@ -509,31 +510,8 @@ export const fetchAnnouncements = async (fromDate: string = '', toDate: string =
     const enhancedData = enhanceAnnouncementData(processedData);
     
     // Make sure newest are first by sorting again
-    return enhancedData.sort((a, b) => {
-      // First sort by isNew flag
-      if (a.isNew && !b.isNew) return -1;
-      if (!a.isNew && b.isNew) return 1;
-      
-      // Then by receivedAt timestamp
-      if (a.receivedAt && b.receivedAt) {
-        const diff = b.receivedAt - a.receivedAt;
-        if (diff !== 0) return diff;
-      }
-      
-      // Finally by date
-      try {
-        const dateA = new Date(a.date).getTime();
-        const dateB = new Date(b.date).getTime();
-        
-        if (isNaN(dateA) || isNaN(dateB)) {
-          return 0;
-        }
-        
-        return dateB - dateA;
-      } catch (e) {
-        return 0;
-      }
-    });
+    return sortByNewestDate(enhancedData);
+    
   } catch (error) {
     console.error("Error fetching announcements:", error);
     

@@ -35,56 +35,44 @@ const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
   
   // Add animation and highlighting for new announcements
   useEffect(() => {
-    if (isNew) {
-      // Set both highlight and animation
-      setIsHighlighted(true);
-      setIsAnimating(true);
-      setIsPulsing(true);
-      
-      // After 5 seconds, stop the pulse animation but keep the highlight
-      const animationTimer = setTimeout(() => {
-        setIsAnimating(false);
-        setIsPulsing(false);
-      }, 5000);
-      
-      // After 30 seconds, remove the highlight
-      const highlightTimer = setTimeout(() => {
-        setIsHighlighted(false);
-      }, 30000);
-      
-      // Scroll into view if new
-      if (rowRef.current) {
-        rowRef.current.scrollIntoView({ 
-          behavior: 'smooth', 
-          block: 'center'
-        });
-      }
-      
-      return () => {
-        clearTimeout(animationTimer);
-        clearTimeout(highlightTimer);
-      };
-    }
-  }, [isNew]);
+  if (isNew) {
+    // Set highlight and animation
+    setIsHighlighted(true);
+    setIsAnimating(true);
+    setIsPulsing(true);
+    
+    // Only stop the pulse animation after 5 seconds, not the highlight
+    const animationTimer = setTimeout(() => {
+      setIsAnimating(false);
+      setIsPulsing(false);
+    }, 5000);
+    
+    // No timer to clear the highlight - it stays until clicked
+    
+    return () => {
+      clearTimeout(animationTimer);
+    };
+  }
+}, [isNew]);
   
   // When the isNew prop changes from false to true (e.g., for a new update)
-  useEffect(() => {
-    if (isNew) {
-      setIsHighlighted(true);
-      setIsAnimating(true);
-      setIsPulsing(true);
+  // useEffect(() => {
+  //   if (isNew) {
+  //     setIsHighlighted(true);
+  //     setIsAnimating(true);
+  //     setIsPulsing(true);
       
-      // Try to scroll into view when new arrives
-      if (rowRef.current) {
-        setTimeout(() => {
-          rowRef.current?.scrollIntoView({ 
-            behavior: 'smooth', 
-            block: 'center'
-          });
-        }, 100);
-      }
-    }
-  }, [isNew]);
+  //     // Try to scroll into view when new arrives
+  //     if (rowRef.current) {
+  //       setTimeout(() => {
+  //         rowRef.current?.scrollIntoView({ 
+  //           behavior: 'smooth', 
+  //           block: 'center'
+  //         });
+  //       }, 100);
+  //     }
+  //   }
+  // }, [isNew]);
 
   const handleRowClick = () => {
     // Mark as read when clicked
@@ -95,7 +83,7 @@ const AnnouncementRow: React.FC<AnnouncementRowProps> = ({
     // Call the original click handler
     onClick(announcement);
     
-    // Clear highlight state
+    // Clear highlight state when clicked
     setIsHighlighted(false);
     setIsPulsing(false);
     setIsAnimating(false);

@@ -2,7 +2,8 @@
 
 import React, { createContext, useEffect, useState, useRef, useCallback, ReactNode, useContext } from 'react';
 import { setupSocketConnection, ProcessedAnnouncement, enhanceAnnouncementData } from '../api';
-import { toast } from 'react-hot-toast'; // Make sure you have this package installed
+import { toast } from 'react-hot-toast';
+import { sortByNewestDate } from '../utils/dateUtils'; // Make sure you have this package installed
 
 // Define the shape of our context
 type SocketContextType = {
@@ -32,9 +33,9 @@ interface SocketProviderProps {
   onNewAnnouncement?: (announcement: ProcessedAnnouncement) => void;
 }
 
-export const SocketProvider: React.FC<SocketProviderProps> = ({ 
-  children, 
-  onNewAnnouncement 
+export const SocketProvider: React.FC<SocketProviderProps> = ({
+  children,
+  onNewAnnouncement
 }) => {
   const [socket, setSocket] = useState<any>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -54,7 +55,7 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
           {announcement.summary?.substring(0, 80)}
           {announcement.summary?.length > 80 ? '...' : ''}
         </div>
-      </div>, 
+      </div>,
       {
         duration: 5000,
         position: 'top-right',
@@ -67,26 +68,26 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
   // Enhanced function to process new announcements
   const processNewAnnouncement = useCallback((data: any) => {
     console.log("Socket context: Processing new announcement:", data);
-    
+
     try {
       // Skip empty data
       if (!data) {
         console.warn("Received empty announcement data");
         return;
       }
-      
+
       // Extract a unique ID for deduplication
       const announcementId = data.corp_id || data.id || data.dedup_id || `new-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      
+
       // Skip if we've already processed this ID
       if (processedAnnouncementIds.current.has(announcementId)) {
         console.log(`Already processed announcement ${announcementId}, skipping`);
         return;
       }
-      
+
       // Mark as processed to prevent duplicates
       processedAnnouncementIds.current.add(announcementId);
-      
+
       // Prepare processed announcement
       const processedAnnouncement: ProcessedAnnouncement = {
         id: announcementId,
@@ -101,33 +102,28 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
         receivedAt: Date.now(), // Add timestamp
         isNew: true // Mark as new
       };
-      
+
       console.log("Socket context: Created processed announcement:", processedAnnouncement);
-      
+
       // Enhance the announcement data
       try {
         const enhancedAnnouncement = enhanceAnnouncementData([processedAnnouncement])[0];
-        
+
         // Update newAnnouncements state - IMPORTANT for components to rerender
         setNewAnnouncements(prev => {
-          // Check for duplicates once more
-          if (prev.some(a => a.id === enhancedAnnouncement.id)) {
-            return prev; // No change
-          }
-          
-          // Add new announcement at the beginning
-          return [enhancedAnnouncement, ...prev];
+          const updated = [...prev, enhancedAnnouncement];
+          return sortByNewestDate(updated);
         });
-        
+
         // Dispatch a custom DOM event so components can react directly
-        const event = new CustomEvent('new-announcement-received', { 
-          detail: enhancedAnnouncement 
+        const event = new CustomEvent('new-announcement-received', {
+          detail: enhancedAnnouncement
         });
         window.dispatchEvent(event);
-        
+
         // Show toast notification
         showAnnouncementToast(enhancedAnnouncement);
-        
+
         // Call the callback if provided
         if (onNewAnnouncement) {
           onNewAnnouncement(enhancedAnnouncement);
@@ -136,10 +132,10 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
         console.error("Error enhancing announcement:", enhanceError);
         // Still try to use the basic announcement
         setNewAnnouncements(prev => [processedAnnouncement, ...prev]);
-        
+
         // Still show notification and call callback
         showAnnouncementToast(processedAnnouncement);
-        
+
         if (onNewAnnouncement) {
           onNewAnnouncement(processedAnnouncement);
         }
@@ -153,44 +149,44 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
   useEffect(() => {
     console.log("Initializing socket connection...");
     setConnectionStatus('connecting');
-    
+
     try {
       // Set up socket connection
       const socketConnection = setupSocketConnection(processNewAnnouncement);
       setSocket(socketConnection);
       socketRef.current = socketConnection;
-      
+
       console.log("Socket connection initialized");
-      
+
       // Set up event listeners for connection status
       const handleConnect = () => {
         console.log("Socket connected event received");
         setIsConnected(true);
         setConnectionStatus('connected');
         setLastError(null);
-        
+
         // Clear old announcement IDs on reconnection to prevent issues
         processedAnnouncementIds.current.clear();
-        
+
         // Show connection toast
         toast.success("Live updates connected!", {
           id: "socket-connected",
           duration: 3000,
           position: "bottom-right"
         });
-        
+
         // Rejoin all active rooms
         Array.from(activeRooms.current).forEach(room => {
           console.log(`Rejoining room after connection: ${room}`);
           socketConnection.joinRoom(room);
         });
       };
-      
+
       const handleDisconnect = () => {
         console.log("Socket disconnected event received");
         setIsConnected(false);
         setConnectionStatus('disconnected');
-        
+
         // Show disconnection toast
         toast.error("Live updates disconnected", {
           id: "socket-disconnected",
@@ -198,13 +194,13 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
           position: "bottom-right"
         });
       };
-      
+
       const handleError = (e: any) => {
         console.error("Socket error event received:", e);
         setConnectionStatus('error');
         setLastError(e.detail?.message || 'Unknown connection error');
       };
-      
+
       // Custom event handler for new announcements - helps with direct component updates
       const handleNewAnnouncementEvent = (event: any) => {
         if (event.detail && typeof event.detail === 'object') {
@@ -212,20 +208,20 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
           // Trigger any components listening to this event
         }
       };
-      
+
       // Listen for socket events
       window.addEventListener('socket:connect', handleConnect);
       window.addEventListener('socket:disconnect', handleDisconnect);
       window.addEventListener('socket:error', handleError);
       window.addEventListener('new-announcement-received', handleNewAnnouncementEvent);
-      
+
       return () => {
         // Clean up event listeners
         window.removeEventListener('socket:connect', handleConnect);
         window.removeEventListener('socket:disconnect', handleDisconnect);
         window.removeEventListener('socket:error', handleError);
         window.removeEventListener('new-announcement-received', handleNewAnnouncementEvent);
-        
+
         // Disconnect socket
         if (socketConnection) {
           console.log("Cleaning up socket connection");
@@ -236,7 +232,7 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
       console.error("Error setting up socket connection:", error);
       setConnectionStatus('error');
       setLastError(`Failed to initialize socket: ${error instanceof Error ? error.message : String(error)}`);
-      return () => {}; // Empty cleanup if setup failed
+      return () => { }; // Empty cleanup if setup failed
     }
   }, [processNewAnnouncement, showAnnouncementToast]);
 
@@ -244,10 +240,10 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
   const reconnect = useCallback(() => {
     console.log("Manual reconnection requested");
     setConnectionStatus('connecting');
-    
+
     // Clear the processed announcements set to ensure we don't miss any
     processedAnnouncementIds.current.clear();
-    
+
     if (socketRef.current) {
       socketRef.current.reconnect();
     } else {
@@ -262,10 +258,10 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
   const contextValue: SocketContextType = {
     joinRoom: (room: string) => {
       if (!room) return;
-      
+
       // Store the room to rejoin later if needed
       activeRooms.current.add(room);
-      
+
       if (socketRef.current) {
         socketRef.current.joinRoom(room);
       } else {
@@ -274,10 +270,10 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
     },
     leaveRoom: (room: string) => {
       if (!room) return;
-      
+
       // Remove from active rooms
       activeRooms.current.delete(room);
-      
+
       if (socketRef.current) {
         socketRef.current.leaveRoom(room);
       }

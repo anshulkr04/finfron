@@ -75,6 +75,7 @@ export function getRelativeTimeString(dateString: string): string {
  */
 export function compareDates(dateA: string, dateB: string): number {
   try {
+    // Ensure consistent parsing of the ISO 8601 format
     const dateObjA = new Date(dateA);
     const dateObjB = new Date(dateB);
     
@@ -83,16 +84,89 @@ export function compareDates(dateA: string, dateB: string): number {
       return dateObjB.getTime() - dateObjA.getTime(); // Newest first
     }
     
-    // If one date is invalid, prioritize the valid one
-    if (!isNaN(dateObjA.getTime())) return -1;
-    if (!isNaN(dateObjB.getTime())) return 1;
-    
-    // If both are invalid, keep original order
-    return 0;
+    // If dates can't be compared properly, fall back to string comparison
+    // This handles cases where the date format might be inconsistent
+    return String(dateB).localeCompare(String(dateA));
   } catch (e) {
     console.error(`Error comparing dates: ${dateA} and ${dateB}`, e);
     return 0;
   }
+}
+
+/**
+ * Consistently sorts announcements by date (newest first), handling multiple date formats
+ */
+export function sortByNewestDate(items: any[]): any[] {
+  return [...items].sort((a, b) => {
+    // First priority: receivedAt timestamp (for real-time socket announcements)
+    if (a.receivedAt && b.receivedAt) {
+      return b.receivedAt - a.receivedAt;
+    }
+    
+    // Convert both dates to timestamps for comparison
+    let timeA = getTimestamp(a.date);
+    let timeB = getTimestamp(b.date);
+    
+    // If conversion failed, try displayDate as fallback
+    if (!timeA && a.displayDate) timeA = getTimestamp(a.displayDate);
+    if (!timeB && b.displayDate) timeB = getTimestamp(b.displayDate);
+    
+    // Compare the timestamps (newest first)
+    if (timeA && timeB) return timeB - timeA;
+    
+    // If timestamps can't be determined, keep original order
+    return 0;
+  });
+}
+
+/**
+ * Extract timestamp from various date formats
+ */
+function getTimestamp(dateStr: string): number | null {
+  if (!dateStr) return null;
+  
+  try {
+    // Try direct parsing first (works for ISO format)
+    const date = new Date(dateStr);
+    
+    // Check if parsing was successful
+    if (!isNaN(date.getTime())) {
+      return date.getTime();
+    }
+    
+    // Handle "May 18, 2025 at 04:38 PM" format
+    const match = dateStr.match(/([A-Za-z]+)\s+(\d+),\s+(\d+)\s+at\s+(\d+):(\d+)\s+(AM|PM)/i);
+    if (match) {
+      const [_, month, day, year, hours, minutes, ampm] = match;
+      const monthIndex = getMonthIndex(month);
+      let hour = parseInt(hours);
+      
+      // Convert 12-hour format to 24-hour
+      if (ampm.toUpperCase() === 'PM' && hour < 12) hour += 12;
+      if (ampm.toUpperCase() === 'AM' && hour === 12) hour = 0;
+      
+      return new Date(
+        parseInt(year),
+        monthIndex,
+        parseInt(day),
+        hour,
+        parseInt(minutes)
+      ).getTime();
+    }
+  } catch (e) {
+    console.error(`Error parsing date: ${dateStr}`, e);
+  }
+  
+  return null;
+}
+
+/**
+ * Get month index from name
+ */
+function getMonthIndex(monthName: string): number {
+  const months = ['january', 'february', 'march', 'april', 'may', 'june', 
+                  'july', 'august', 'september', 'october', 'november', 'december'];
+  return months.indexOf(monthName.toLowerCase());
 }
 
 /**
