@@ -99,7 +99,7 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
         detailedContent: data.ai_summary || data.summary || "",
         isin: data.isin || data.ISIN || "",
         sentiment: "Neutral", // Default sentiment
-        receivedAt: Date.now(), // Add timestamp
+        // receivedAt: Date.now(), // Add timestamp
         isNew: true // Mark as new
       };
 

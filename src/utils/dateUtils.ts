@@ -98,24 +98,14 @@ export function compareDates(dateA: string, dateB: string): number {
  */
 export function sortByNewestDate(items: any[]): any[] {
   return [...items].sort((a, b) => {
-    // First priority: receivedAt timestamp (for real-time socket announcements)
-    if (a.receivedAt && b.receivedAt) {
-      return b.receivedAt - a.receivedAt;
+    const timeA = a.date ? new Date(a.date).getTime() : 0;
+    const timeB = b.date ? new Date(b.date).getTime() : 0;
+
+    if (!isNaN(timeA) && !isNaN(timeB)) {
+      return timeB - timeA; // Newest first
     }
-    
-    // Convert both dates to timestamps for comparison
-    let timeA = getTimestamp(a.date);
-    let timeB = getTimestamp(b.date);
-    
-    // If conversion failed, try displayDate as fallback
-    if (!timeA && a.displayDate) timeA = getTimestamp(a.displayDate);
-    if (!timeB && b.displayDate) timeB = getTimestamp(b.displayDate);
-    
-    // Compare the timestamps (newest first)
-    if (timeA && timeB) return timeB - timeA;
-    
-    // If timestamps can't be determined, keep original order
-    return 0;
+
+    return 0; // Fallback if date is invalid or missing
   });
 }
 
