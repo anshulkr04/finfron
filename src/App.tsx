@@ -32,14 +32,14 @@ const AppWithSocket = () => {
   const handleViewNewAnnouncements = () => {
     // Reset to first page
     setCurrentPage(1);
-    
+
     // Scroll to top where new announcements are displayed
     window.scrollTo({
       top: 0,
       behavior: 'smooth'
     });
   };
-  
+
 
   const handleNavigate = (page: 'home' | 'watchlist' | 'company', params?: { watchlistId?: string }) => {
     if (page === 'home') {
@@ -64,27 +64,27 @@ const AppWithSocket = () => {
   const handleNewAnnouncement = useCallback((rawAnnouncement: any) => {
     try {
       console.log('New announcement received:', rawAnnouncement);
-      
+
       // Basic validation
       if (!rawAnnouncement) {
         console.warn('Received empty announcement data');
         return;
       }
-      
+
       // Create a unique ID for deduplication
-      const announcementId = rawAnnouncement.corp_id || 
-                             rawAnnouncement.id || 
-                             `new-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      
+      const announcementId = rawAnnouncement.corp_id ||
+        rawAnnouncement.id ||
+        `new-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
       // Check if we've already processed this announcement
       if (processedAnnouncementIds.current.has(announcementId)) {
         console.log(`Announcement ${announcementId} already processed, skipping`);
         return;
       }
-      
+
       // Mark as processed
       processedAnnouncementIds.current.add(announcementId);
-      
+
       // Format basic announcement data
       const baseAnnouncement: ProcessedAnnouncement = {
         id: announcementId,
@@ -102,7 +102,7 @@ const AppWithSocket = () => {
         sentiment: "Neutral",
         receivedAt: Date.now()
       };
-      
+
       // Enhance the announcement data
       let processedAnnouncement: ProcessedAnnouncement;
       try {
@@ -112,7 +112,7 @@ const AppWithSocket = () => {
         // Fallback to base announcement if enhancement fails
         processedAnnouncement = baseAnnouncement;
       }
-      
+
       // Update state with the new announcement
       setNewAnnouncements(prev => {
         // Check for duplicates again (by ID, which should be unique)
@@ -121,7 +121,7 @@ const AppWithSocket = () => {
         }
         return [processedAnnouncement, ...prev];
       });
-      
+
       // Show toast notification with company info and summary
       toast.success(
         <div>
@@ -130,7 +130,7 @@ const AppWithSocket = () => {
             {processedAnnouncement.summary?.substring(0, 80)}
             {processedAnnouncement.summary?.length > 80 ? '...' : ''}
           </div>
-        </div>, 
+        </div>,
         {
           duration: 5000,
           position: 'top-right',
@@ -142,7 +142,7 @@ const AppWithSocket = () => {
       console.error('Error processing new announcement:', error);
     }
   }, []);
-  
+
   // Cleanup old "new" announcements after a while
   useEffect(() => {
     if (newAnnouncements.length > 0) {
@@ -150,8 +150,8 @@ const AppWithSocket = () => {
         // Move announcements from "new" to regular after 5 minutes
         const now = Date.now();
         const fiveMinutesAgo = now - 5 * 60 * 1000;
-        
-        setNewAnnouncements(prev => 
+
+        setNewAnnouncements(prev =>
           prev.filter(announcement => {
             // Keep only announcements that arrived in the last 5 minutes
             const announcementTime = announcement.receivedAt || now;
@@ -159,7 +159,7 @@ const AppWithSocket = () => {
           })
         );
       }, 60000); // Check every minute
-      
+
       return () => clearTimeout(timer);
     }
   }, [newAnnouncements]);
@@ -186,44 +186,44 @@ const AppWithSocket = () => {
             <Routes>
               {/* Auth Routes */}
               <Route path="/auth/*" element={<AuthRouter />} />
-              
+
               {/* Protected App Routes */}
               <Route path="/" element={
                 <ProtectedRoute>
                   {activePage === 'dashboard' ? (
-                    <Dashboard 
-                      onNavigate={handleNavigate} 
+                    <Dashboard
+                      onNavigate={handleNavigate}
                       onCompanySelect={handleCompanyClick}
                       newAnnouncements={newAnnouncements}
                     />
                   ) : activePage === 'watchlist' ? (
-                    <WatchlistPage 
-                      onViewAnnouncements={handleViewAnnouncements} 
-                      onNavigate={handleNavigate} 
+                    <WatchlistPage
+                      onViewAnnouncements={handleViewAnnouncements}
+                      onNavigate={handleNavigate}
                       watchlistParams={watchlistParams}
                       newAnnouncements={newAnnouncements}
                     />
                   ) : (
                     selectedCompany && (
-                      <CompanyPage 
-                        company={selectedCompany} 
+                      <CompanyPage
+                        company={selectedCompany}
                         onNavigate={handleNavigate}
-                        onBack={() => setActivePage('dashboard')} 
+                        onBack={() => setActivePage('dashboard')}
                         newAnnouncements={newAnnouncements.filter(
-                          a => a.company === selectedCompany.name || 
-                              a.isin === selectedCompany.isin ||
-                              a.ticker === selectedCompany.symbol
+                          a => a.company === selectedCompany.name ||
+                            a.isin === selectedCompany.isin ||
+                            a.ticker === selectedCompany.symbol
                         )} // Filter announcements relevant to this company
                       />
                     )
                   )}
                 </ProtectedRoute>
               } />
-              
+
               {/* Fallback route */}
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
-            <NotificationIndicator 
+            <NotificationIndicator
               onViewNewAnnouncements={handleViewNewAnnouncements}
             />
           </WatchlistProvider>

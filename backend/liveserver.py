@@ -1121,11 +1121,11 @@ def save_announcement():
         if supabase_connected:
             try:
                 # Check if the announcement already exists
-                search_id = data.get('id') or data.get('corp_id')
+                search_id =data.get('corp_id')
                 exists = False
                 
                 if search_id:
-                    response = supabase.table('corporatefilings').select('id').eq('id', search_id).execute()
+                    response = supabase.table('corporatefilings').select('corp_id').eq('corp_id', search_id).execute()
                     exists = response.data and len(response.data) > 0
                 
                 if not exists:
@@ -1185,9 +1185,9 @@ def insert_new_announcement():
         announcement_exists = False
         if supabase_connected:
             try:
-                search_id = data.get('id') or data.get('corp_id')
+                search_id =data.get('corp_id')
                 if search_id:
-                    response = supabase.table('corporatefilings').select('id').eq('id', search_id).execute()
+                    response = supabase.table('corporatefilings').select('corp_id').eq('corp_id', search_id).execute()
                     announcement_exists = response.data and len(response.data) > 0
             except Exception as e:
                 logger.warning(f"Error checking database for existing announcement: {str(e)}")
@@ -1196,7 +1196,7 @@ def insert_new_announcement():
         if supabase_connected and not announcement_exists:
             try:
                 supabase.table('corporatefilings').insert(data).execute()
-                logger.debug(f"Announcement saved to database: {data.get('id') or data.get('corp_id')}")
+                logger.debug(f"Announcement saved to database: {data.get('corp_id')}")
             except Exception as e:
                 logger.error(f"Error saving to database: {str(e)}")
         elif announcement_exists:
@@ -1276,10 +1276,10 @@ def test_announcement():
         # Create test announcement data
         test_announcement = {
             'id': f"test-{datetime.datetime.now().timestamp()}",
-            'companyname': 'Test Company',
-            'symbol': 'TEST',
-            'category': 'Test Announcement',
-            'summary': 'This is a test announcement to verify WebSocket functionality.',
+            'companyname': 'Anshul',
+            'symbol': 'ANSHUL',
+            'category': 'ABC',
+            'summary': 'Just Checking in',
             'ai_summary': '**Category:** Test Announcement\n**Headline:** Test WebSocket Functionality\n\nThis is a test announcement to verify WebSocket functionality.',
             'isin': 'TEST12345678',
             'timestamp': datetime.datetime.now().isoformat()
@@ -1402,16 +1402,16 @@ def start_scraper():
         logger.info("Starting BSE scraper in background thread...")
         
         # Get the path to the bse_scraper.py file
-        scraper_path = Path(__file__).parent / "bse_scraper.py"
+        scraper_path = Path(__file__).parent / "new_scraper.py"
         
         if not scraper_path.exists():
             logger.error(f"Scraper file not found at: {scraper_path}")
             return
             
         # Import the scraper module dynamically
-        spec = importlib.util.spec_from_file_location("bse_scraper", scraper_path)
+        spec = importlib.util.spec_from_file_location("new_scraper", scraper_path)
         scraper_module = importlib.util.module_from_spec(spec)
-        sys.modules["bse_scraper"] = scraper_module
+        sys.modules["new_scraper"] = scraper_module
         spec.loader.exec_module(scraper_module)
         
         # Create and run the scraper
