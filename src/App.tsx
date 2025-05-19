@@ -16,6 +16,8 @@ import { SocketProvider } from './context/SocketContext';
 import { useAuth } from './context/AuthContext';
 import { toast, Toaster } from 'react-hot-toast';
 import NotificationIndicator from './components/common/NotificationIndicator';
+import { sortByNewestDate } from './utils/dateUtils';
+
 
 // Inner component with enhanced socket handling
 const AppWithSocket = () => {
@@ -60,88 +62,79 @@ const AppWithSocket = () => {
     setActivePage('company');
   };
 
-  // Enhanced new announcement handler with better error handling
-  const handleNewAnnouncement = useCallback((rawAnnouncement: any) => {
-    try {
-      console.log('New announcement received:', rawAnnouncement);
+  // Enhanced new announcement handler without duplicate toast notifications
+// Enhanced new announcement handler without duplicate toast notifications
+const handleNewAnnouncement = useCallback((rawAnnouncement: any) => {
+  try {
+    console.log('New announcement received in App:', rawAnnouncement);
 
-      // Basic validation
-      if (!rawAnnouncement) {
-        console.warn('Received empty announcement data');
-        return;
-      }
-
-      // Create a unique ID for deduplication
-      const announcementId = rawAnnouncement.corp_id ||
-        rawAnnouncement.id ||
-        `new-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-
-      // Check if we've already processed this announcement
-      if (processedAnnouncementIds.current.has(announcementId)) {
-        console.log(`Announcement ${announcementId} already processed, skipping`);
-        return;
-      }
-
-      // Mark as processed
-      processedAnnouncementIds.current.add(announcementId);
-
-      // Format basic announcement data
-      const baseAnnouncement: ProcessedAnnouncement = {
-        id: announcementId,
-        company: rawAnnouncement.companyname || rawAnnouncement.company || "Unknown Company",
-        ticker: rawAnnouncement.symbol || rawAnnouncement.Symbol || "",
-        category: rawAnnouncement.category || rawAnnouncement.Category || "Other",
-        date: new Date().toLocaleDateString('en-US', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
-        }),
-        summary: rawAnnouncement.ai_summary || rawAnnouncement.summary || "",
-        detailedContent: rawAnnouncement.ai_summary || rawAnnouncement.summary || "",
-        isin: rawAnnouncement.isin || rawAnnouncement.ISIN || "",
-        sentiment: "Neutral",
-        receivedAt: Date.now()
-      };
-
-      // Enhance the announcement data
-      let processedAnnouncement: ProcessedAnnouncement;
-      try {
-        processedAnnouncement = enhanceAnnouncementData([baseAnnouncement])[0];
-      } catch (enhanceError) {
-        console.error('Error enhancing announcement data:', enhanceError);
-        // Fallback to base announcement if enhancement fails
-        processedAnnouncement = baseAnnouncement;
-      }
-
-      // Update state with the new announcement
-      setNewAnnouncements(prev => {
-        // Check for duplicates again (by ID, which should be unique)
-        if (prev.some(a => a.id === processedAnnouncement.id)) {
-          return prev; // No change if duplicate
-        }
-        return [processedAnnouncement, ...prev];
-      });
-
-      // Show toast notification with company info and summary
-      toast.success(
-        <div>
-          <div className="font-medium">{processedAnnouncement.company}</div>
-          <div className="text-sm">
-            {processedAnnouncement.summary?.substring(0, 80)}
-            {processedAnnouncement.summary?.length > 80 ? '...' : ''}
-          </div>
-        </div>,
-        {
-          duration: 5000,
-          position: 'top-right',
-          className: 'announcement-toast',
-          icon: '🔔',
-        }
-      );
-    } catch (error) {
-      console.error('Error processing new announcement:', error);
+    // Basic validation
+    if (!rawAnnouncement) {
+      console.warn('Received empty announcement data');
+      return;
     }
-  }, []);
+
+    // Create a unique ID for deduplication
+    const announcementId = rawAnnouncement.corp_id ||
+      rawAnnouncement.id ||
+      `new-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+    // Check if we've already processed this announcement
+    if (processedAnnouncementIds.current.has(announcementId)) {
+      console.log(`Announcement ${announcementId} already processed in App, skipping`);
+      return;
+    }
+
+    // Mark as processed
+    processedAnnouncementIds.current.add(announcementId);
+
+    // Format basic announcement data
+    const baseAnnouncement: ProcessedAnnouncement = {
+      id: announcementId,
+      company: rawAnnouncement.companyname || rawAnnouncement.company || "Unknown Company",
+      ticker: rawAnnouncement.symbol || rawAnnouncement.Symbol || "",
+      category: rawAnnouncement.category || rawAnnouncement.Category || "Other",
+      date: new Date().toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      }),
+      summary: rawAnnouncement.ai_summary || rawAnnouncement.summary || "",
+      detailedContent: rawAnnouncement.ai_summary || rawAnnouncement.summary || "",
+      isin: rawAnnouncement.isin || rawAnnouncement.ISIN || "",
+      sentiment: "Neutral",
+      isNew: true // Mark as new
+    };
+
+    // Enhance the announcement data
+    let processedAnnouncement: ProcessedAnnouncement;
+    try {
+      processedAnnouncement = enhanceAnnouncementData([baseAnnouncement])[0];
+    } catch (enhanceError) {
+      console.error('Error enhancing announcement data:', enhanceError);
+      // Fallback to base announcement if enhancement fails
+      processedAnnouncement = baseAnnouncement;
+    }
+
+    // Update state with the new announcement
+    setNewAnnouncements(prev => {
+      // Check for duplicates again (by ID, which should be unique)
+      if (prev.some(a => a.id === processedAnnouncement.id)) {
+        return prev; // No change if duplicate
+      }
+      
+      // Add to the beginning and sort properly
+      const updated = [processedAnnouncement, ...prev];
+      return sortByNewestDate(updated);
+    });
+    
+    // REMOVED: Toast notification - now handled in SocketContext.tsx
+    // REMOVED: setShowNewIndicator reference which isn't available in this context
+    
+  } catch (error) {
+    console.error('Error processing new announcement:', error);
+  }
+}, []);
 
   // Cleanup old "new" announcements after a while
   useEffect(() => {

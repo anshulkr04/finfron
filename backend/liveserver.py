@@ -1155,116 +1155,6 @@ def save_announcement():
         logger.error(traceback.format_exc())
         return jsonify({'message': f'Error saving announcement: {str(e)}', 'status': 'error'}), 500
 
-# # Now update the insert_new_announcement endpoint to be clearer about its dual purpose
-# @app.route('/api/insert_new_announcement', methods=['POST', 'OPTIONS'])
-# def insert_new_announcement():
-#     """Endpoint to save announcements to database AND broadcast via WebSocket"""
-#     if request.method == 'OPTIONS':
-#         return _handle_options()
-        
-#     try:
-#         data = request.get_json()
-        
-#         if not data:
-#             logger.warning("Received empty announcement data")
-#             return jsonify({'message': 'Missing data!', 'status': 'error'}), 400
-        
-#         # Add timestamp if not present
-#         if 'timestamp' not in data:
-#             data['timestamp'] = datetime.datetime.now().isoformat()
-        
-#         # Add a unique ID if not present
-#         if 'id' not in data and 'corp_id' not in data:
-#             data['id'] = f"announcement-{datetime.datetime.now().timestamp()}"
-        
-#         # Generate a deduplication hash for frontend
-#         dedup_hash = hashlib.md5(f"{data.get('companyname', '')}-{data.get('summary', '')[:100]}".encode()).hexdigest()
-#         data['dedup_id'] = dedup_hash
-        
-#         # Check if the announcement exists in the database
-#         announcement_exists = False
-#         if supabase_connected:
-#             try:
-#                 search_id =data.get('corp_id')
-#                 if search_id:
-#                     response = supabase.table('corporatefilings').select('corp_id').eq('corp_id', search_id).execute()
-#                     announcement_exists = response.data and len(response.data) > 0
-#             except Exception as e:
-#                 logger.warning(f"Error checking database for existing announcement: {str(e)}")
-        
-#         # First, save to database regardless of whether it's broadcast
-#         if supabase_connected and not announcement_exists:
-#             try:
-#                 supabase.table('corporatefilings').insert(data).execute()
-#                 logger.debug(f"Announcement saved to database: {data.get('corp_id')}")
-#             except Exception as e:
-#                 logger.error(f"Error saving to database: {str(e)}")
-#         elif announcement_exists:
-#             logger.debug(f"Announcement already exists in database, skipping insert")
-        
-#         # Now handle broadcasting via WebSocket
-#         # Only broadcast if it's explicitly marked for broadcast or has is_fresh flag
-#         should_broadcast = data.get('broadcast', False) or data.get('is_fresh', False)
-        
-#         if should_broadcast:
-#             # Log announcement
-#             logger.info(f"Broadcasting announcement: {data.get('companyname', 'Unknown')}: {data.get('summary', '')[:100]}...")
-            
-#             # Broadcast to all clients
-#             socketio.emit('new_announcement', data)
-            
-#             # Broadcast to specific rooms
-#             rooms = ['all']  # Always broadcast to 'all' room
-            
-#             # ISIN-specific room
-#             if 'isin' in data and data['isin']:
-#                 isin_room = data['isin']
-#                 socketio.emit('new_announcement', data, room=isin_room)
-#                 rooms.append(isin_room)
-            
-#             # Symbol/ticker-specific room
-#             if 'symbol' in data and data['symbol']:
-#                 symbol_room = data['symbol']
-#                 socketio.emit('new_announcement', data, room=symbol_room)
-#                 rooms.append(symbol_room)
-                
-#             # Company-specific room
-#             if 'companyname' in data and data['companyname']:
-#                 company_room = f"company:{data['companyname']}"
-#                 socketio.emit('new_announcement', data, room=company_room)
-#                 rooms.append(company_room)
-                
-#             # Category-specific room
-#             if 'category' in data and data['category']:
-#                 category_room = f"category:{data['category']}"
-#                 socketio.emit('new_announcement', data, room=category_room)
-#                 rooms.append(category_room)
-            
-#             logger.info(f"Announcement broadcast to rooms: {', '.join(rooms)}")
-            
-#             return jsonify({
-#                 'message': 'Announcement saved to database and broadcast via WebSocket',
-#                 'status': 'success',
-#                 'rooms': rooms,
-#                 'is_new': True,
-#                 'broadcast': True
-#             }), 200
-#         else:
-#             # If not broadcasting, just report successful database save
-#             logger.info(f"Announcement saved to database (no broadcast): {data.get('companyname', 'Unknown')}")
-#             return jsonify({
-#                 'message': 'Announcement saved to database (no broadcast)',
-#                 'status': 'success',
-#                 'is_new': False, 
-#                 'broadcast': False
-#             }), 200
-            
-#     except Exception as e:
-#         # Log the full error trace for debugging
-#         logger.error(f"Error processing announcement: {str(e)}")
-#         logger.error(traceback.format_exc())
-#         return jsonify({'message': f'Error processing announcement: {str(e)}', 'status': 'error'}), 500
-
 @app.route('/api/insert_new_announcement', methods=['POST', 'OPTIONS'])
 def insert_new_announcement():
     if request.method == 'OPTIONS':
@@ -1278,7 +1168,7 @@ def insert_new_announcement():
 
         logger.info(f"Received data: {data}")
 
-        test_announcement = {
+        new_announcement = {
             "id": data.get('corp_id'),
             "securityid": data.get('securityid'),
             "summary": data.get('summary'),
@@ -1291,8 +1181,8 @@ def insert_new_announcement():
             "symbol": data.get('symbol'),
         }
 
-        logger.info(f"Broadcasting: {test_announcement}")
-        socketio.emit('new_announcement', test_announcement)
+        logger.info(f"Broadcasting: {new_announcement}")
+        socketio.emit('new_announcement', new_announcement)
         return jsonify({'message': 'Test announcement sent successfully!', 'status': 'success'}), 200
 
     except Exception as e:
