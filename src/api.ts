@@ -349,7 +349,9 @@ export const processAnnouncementData = (data: any[]): ProcessedAnnouncement[] =>
   
   data.forEach((item, index) => {
     // Generate a unique ID for deduplication
-    const id = item.id || item.corp_id || item.NEWSID || `filing-${index}-${Date.now()}`;
+    // const id = item.id || item.corp_id || item.NEWSID || `filing-${index}-${Date.now()}`;
+    const id =  item.corp_id ;
+
     
     // Skip if we've already processed this ID
     if (seenIds.has(id)) {

@@ -19,6 +19,7 @@ from pathlib import Path
 from flask_socketio import SocketIO, emit
 import time
 import traceback
+from mailer import send_batch_mail
 
 # Configure logging
 logging.basicConfig(
@@ -221,6 +222,60 @@ def auth_required(f):
     
     return decorated
 
+def get_users_by_isin(isin):
+    """Get users by ISIN from the database."""
+    if not supabase_connected:
+        return []
+    
+    try:
+        response = supabase.table('watchlistdata').select('userid').eq('isin', isin).execute()
+        if response.data:
+            return [user['userid'] for user in response.data]
+        else:
+            logger.error(f"Error fetching users by ISIN: {response.error}")
+            return []
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        return []
+
+def get_user_by_category(category):
+    """Get users by category from the database."""
+    if not supabase_connected:
+        return []
+    
+    try:
+        response = supabase.table('watchlistdata').select('userid').eq('category', category).execute()
+        if response.data:
+            return [user['userid'] for user in response.data]
+        else:
+            logger.error(f"Error fetching users by category: {response.error}")
+            return []
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        return []
+    
+def getUserEmail(userids):
+    """Get user email by user ID from the database."""
+    email_ids = []
+    for userid in userids:
+        try:
+            response = supabase.table('UserData').select('emailID').eq('UserID', userid).execute()
+            if response.data:
+                email_ids.append(response.data[0]['emailID'])
+            else:
+                logger.error(f"Error fetching email for user ID {userid}: {response.error}")
+        except Exception as e:
+            logger.error(f"An error occurred: {e}")
+
+def get_all_users_email(isin,category):
+    isinUsers = get_users_by_isin(isin)
+    categoryUsers = get_user_by_category(category)
+
+    allUsers = list(set(isinUsers) | set(categoryUsers))
+    email_ids = getUserEmail(allUsers)
+
+    return email_ids
+
 
 # A simple health check endpoint
 @app.route('/health', methods=['GET', 'OPTIONS'])
@@ -303,11 +358,18 @@ def register():
         # Hash the password
         hashed_password = hash_password(password)
         
-        # Create initial watchlist
-        watchlist = {
-            "_id": str(uuid.uuid4()),
-            "isin": []
-        }
+        # Generate a UUID for the watchlist
+        watchlist_id = str(uuid.uuid4())
+        
+        # Create initial watchlist in watchlistnamedata
+        supabase.table('watchlistnamedata').insert({
+            'watchlistid': watchlist_id,
+            'watchlistname': 'Real Time Alerts',
+            'userid': user_id
+        }).execute()
+        
+        # Store the generated watchlist ID
+        watchlist = watchlist_id
         
         # Create user data
         user_data = {
@@ -489,39 +551,68 @@ def upgrade_account(current_user):
         return jsonify({'message': f'Upgrade failed: {str(e)}'}), 500
 
 # Watchlist APIs
+#!/usr/bin/env python3
+"""
+Supabase API Response Fix
+
+This script contains fixed versions of the watchlist API endpoint functions 
+that properly handle the Supabase Python SDK responses.
+"""
+
+# Fixed Watchlist API Endpoints
 @app.route('/api/watchlist', methods=['GET', 'OPTIONS'])
 @auth_required
 def get_watchlist(current_user):
     if request.method == 'OPTIONS':
         return _handle_options()
-    
+
     user_id = current_user['UserID']
     logger.debug(f"Get watchlist for user: {user_id}")
-    
+
     try:
-        watchlists = current_user.get('WatchListID', [])
+        # Step 1: Get all watchlists for the user
+        response = supabase.table('watchlistnamedata') \
+            .select('watchlistid, watchlistname') \
+            .eq('userid', user_id).execute()
 
-        # If no watchlists exist, initialize with an empty array
-        if watchlists is None or not isinstance(watchlists, list):
-            watchlists = [{
-                "_id": str(uuid.uuid4()),
-                "watchlistName": "My Watchlist",
-                "isin": []
-            }]
+        # No need to check status_code - just check for error
+        if hasattr(response, 'error') and response.error:
+            logger.error(f"Error fetching watchlistnamedata: {response.error}")
+            return jsonify({'message': 'Error fetching watchlists.'}), 500
 
-            if not supabase_connected:
-                return jsonify({'message': 'Database service unavailable. Please try again later.'}), 503
+        watchlist_meta = response.data
 
-            supabase.table('UserData').update({'WatchListID': watchlists}).eq('UserID', user_id).execute()
+        # Step 2: For each watchlist, get ISINs and category separately
+        watchlists = []
+        for entry in watchlist_meta:
+            watchlist_id = entry['watchlistid']
+            watchlist_name = entry['watchlistname']
 
-        # Validate structure of each watchlist
-        for watchlist in watchlists:
-            if 'isin' not in watchlist or not isinstance(watchlist['isin'], list):
-                watchlist['isin'] = []
-            if 'watchlistName' not in watchlist:
-                watchlist['watchlistName'] = "My Watchlist"
-            if '_id' not in watchlist:
-                watchlist['_id'] = str(uuid.uuid4())
+            # Get ISINs (where category is NULL)
+            isin_response = supabase.table('watchlistdata') \
+                .select('isin') \
+                .eq('watchlistid', watchlist_id) \
+                .eq('userid', user_id) \
+                .is_('category', 'null') \
+                .execute()
+
+            # Get category (where isin is NULL)
+            cat_response = supabase.table('watchlistdata') \
+                .select('category') \
+                .eq('watchlistid', watchlist_id) \
+                .eq('userid', user_id) \
+                .is_('isin', 'null') \
+                .execute()
+
+            isins = [row['isin'] for row in isin_response.data] if isin_response.data else []
+            category = cat_response.data[0]['category'] if cat_response.data else None
+
+            watchlists.append({
+                '_id': watchlist_id,
+                'watchlistName': watchlist_name,
+                'category': category,
+                'isin': isins
+            })
 
         return jsonify({'watchlists': watchlists}), 200
 
@@ -529,93 +620,118 @@ def get_watchlist(current_user):
         logger.error(f"Get watchlist error: {str(e)}")
         return jsonify({'message': f'Failed to retrieve watchlist: {str(e)}'}), 500
 
-    
+
 @app.route('/api/watchlist', methods=['POST', 'OPTIONS'])
 @auth_required
 def create_watchlist(current_user):
     if request.method == 'OPTIONS':
         return _handle_options()
-    
+
     data = request.get_json() or {}
     user_id = current_user['UserID']
-    logger.info(f"Create watchlist for user: {user_id}")
+    logger.info(f"Create/watchlist operation for user: {user_id}")
 
     try:
-        # Check if create or add to watchlist
         operation = data.get('operation')
-        
+
         if operation == 'create':
-            new_watchlist = {
-                "_id": str(uuid.uuid4()),
-                "watchlistName": data.get('watchlistName', 'My Watchlist'),
-                "isin": []
-            }
+            # Create a new watchlist
+            watchlist_id = str(uuid.uuid4())
+            watchlist_name = data.get('watchlistName', 'My Watchlist')
 
-            watchlists = current_user.get('WatchListID', [])
-            if watchlists is None or not isinstance(watchlists, list):
-                watchlists = []
-            
-            watchlists.append(new_watchlist)
+            # Insert into watchlistnamedata
+            insert_response = supabase.table('watchlistnamedata').insert({
+                'watchlistid': watchlist_id,
+                'watchlistname': watchlist_name,
+                'userid': user_id
+            }).execute()
 
-            if not supabase_connected:
-                return jsonify({'message': 'Database service unavailable. Please try again later.'}), 503
+            # Check for error instead of status_code
+            if hasattr(insert_response, 'error') and insert_response.error:
+                logger.error(f"Failed to create watchlist: {insert_response.error}")
+                return jsonify({'message': 'Failed to create watchlist.'}), 500
 
-            supabase.table('UserData').update({'WatchListID': watchlists}).eq('UserID', user_id).execute()
+            logger.debug(f"Watchlist {watchlist_id} created for user {user_id}")
+            return jsonify({
+                'message': 'Watchlist created!',
+                'watchlist': {
+                    '_id': watchlist_id,
+                    'watchlistName': watchlist_name,
+                    'category': None,
+                    'isin': []
+                }
+            }), 201
 
-            logger.debug(f"Watchlist created successfully for user: {user_id}")
-            return jsonify({'watchlist': new_watchlist, 'watchlists': watchlists}), 201
-            
         elif operation == 'add_isin':
-            # This section handles adding an ISIN to a specific watchlist
+            # Add ISIN to watchlistdata
             watchlist_id = data.get('watchlist_id')
             isin = data.get('isin')
-            
-            if not isin:
-                return jsonify({'message': 'Missing required fields! isin is required.'}), 400
+            category = data.get('category')
 
-            if not isinstance(isin, str) or len(isin) != 12 or not isin.isalnum():
-                return jsonify({'message': 'Invalid ISIN format! ISIN must be a 12-character alphanumeric code.'}), 400
-                
             if not watchlist_id:
-                return jsonify({'message': 'Missing required fields! watchlist_id is required.'}), 400
+                return jsonify({'message': 'watchlist_id is required.'}), 400
+
+            if isin is not None:
+                if not isinstance(isin, str) or len(isin) != 12 or not isin.isalnum():
+                    return jsonify({'message': 'Invalid ISIN format! ISIN must be a 12-character alphanumeric code.'}), 400
+
+            # Check if ISIN already exists in this watchlist
+            check = supabase.table('watchlistdata').select('isin') \
+                .eq('watchlistid', watchlist_id) \
+                .eq('userid', user_id) \
+                .eq('isin', isin) \
+                .execute()
                 
-            watchlists = current_user.get('WatchListID', [])
-            if watchlists is None or not isinstance(watchlists, list):
-                watchlists = [{
-                    "_id": str(uuid.uuid4()),
-                    "watchlistName": "My Watchlist",
-                    "isin": []
-                }]
-                
-            # Find the specific watchlist
-            target_watchlist = None
-            for watchlist in watchlists:
-                if watchlist.get('_id') == watchlist_id:
-                    target_watchlist = watchlist
-                    break
+            if check.data:
+                return jsonify({'message': 'ISIN already exists in this watchlist!'}), 409
+
+            # First, if category is provided, update or insert the category row
+            if category:
+                # Check if category row exists
+                cat_check = supabase.table('watchlistdata').select('category') \
+                    .eq('watchlistid', watchlist_id) \
+                    .eq('userid', user_id) \
+                    .is_('isin', 'null') \
+                    .execute()
                     
-            if not target_watchlist:
-                return jsonify({'message': 'Watchlist not found!'}), 404
-                
-            if 'isin' not in target_watchlist or not isinstance(target_watchlist['isin'], list):
-                target_watchlist['isin'] = []
-                
-            if isin in target_watchlist['isin']:
-                return jsonify({'message': 'ISIN already in watchlist!'}), 409
-                
-            target_watchlist['isin'].append(isin)
-            
-            if not supabase_connected:
-                return jsonify({'message': 'Database service unavailable. Please try again later.'}), 503
-                
-            supabase.table('UserData').update({'WatchListID': watchlists}).eq('UserID', user_id).execute()
-            
-            logger.debug(f"ISIN {isin} added to watchlist {watchlist_id} for user: {user_id}")
+                if cat_check.data:
+                    # Update existing category
+                    supabase.table('watchlistdata') \
+                        .update({'category': category}) \
+                        .eq('watchlistid', watchlist_id) \
+                        .eq('userid', user_id) \
+                        .is_('isin', 'null') \
+                        .execute()
+                else:
+                    # Insert new category row
+                    supabase.table('watchlistdata').insert({
+                        'watchlistid': watchlist_id,
+                        'userid': user_id,
+                        'category': category,
+                        'isin': None
+                    }).execute()
+
+            # Then insert ISIN row (with null category)
+            insert = supabase.table('watchlistdata').insert({
+                'watchlistid': watchlist_id,
+                'userid': user_id,
+                'isin': isin,
+                'category': None
+            }).execute()
+
+            # Check for error instead of status_code
+            if hasattr(insert, 'error') and insert.error:
+                logger.error(f"Failed to add ISIN: {insert.error}")
+                return jsonify({'message': 'Failed to add ISIN to watchlist.'}), 500
+
+            logger.debug(f"ISIN {isin} added to watchlist {watchlist_id} for user {user_id}")
             return jsonify({
                 'message': 'ISIN added to watchlist!',
-                'watchlist': target_watchlist,
-                'watchlists': watchlists
+                'watchlist_id': watchlist_id,
+                'isin': isin,
+                'category': category
             }), 201
+
         else:
             return jsonify({'message': 'Invalid operation! Use "create" or "add_isin".'}), 400
 
@@ -634,40 +750,63 @@ def remove_from_watchlist(current_user, watchlist_id, isin):
     logger.info(f"Remove ISIN {isin} from watchlist {watchlist_id} for user: {user_id}")
 
     try:
-        watchlists = current_user.get('WatchListID', [])
-
-        if watchlists is None or not isinstance(watchlists, list) or not watchlists:
-            return jsonify({'message': 'No watchlists found!'}), 404
-
-        # Find the target watchlist
-        target_watchlist = None
-        for watchlist in watchlists:
-            if watchlist.get('_id') == watchlist_id:
-                target_watchlist = watchlist
-                break
-                
-        if not target_watchlist:
-            return jsonify({'message': 'Watchlist not found!'}), 404
+        # First verify the watchlist belongs to the user
+        wl_check = supabase.table('watchlistnamedata').select('watchlistid') \
+            .eq('watchlistid', watchlist_id).eq('userid', user_id).execute()
+        
+        if not wl_check.data:
+            return jsonify({'message': 'Watchlist not found or unauthorized!'}), 404
+        
+        # Delete the specific ISIN from the watchlist
+        delete_response = supabase.table('watchlistdata') \
+            .delete() \
+            .eq('watchlistid', watchlist_id) \
+            .eq('userid', user_id) \
+            .eq('isin', isin) \
+            .execute()
             
-        if 'isin' not in target_watchlist or not isinstance(target_watchlist['isin'], list):
-            return jsonify({'message': 'Watchlist is empty!'}), 404
-
-        if isin not in target_watchlist['isin']:
+        # Check for error and empty data instead of status_code
+        if (hasattr(delete_response, 'error') and delete_response.error) or not delete_response.data:
             return jsonify({'message': 'ISIN not found in watchlist!'}), 404
+        
+        # Get the updated watchlist data to return
+        wl_name_response = supabase.table('watchlistnamedata') \
+            .select('watchlistname') \
+            .eq('watchlistid', watchlist_id).execute()
+            
+        # Get ISINs (where category is NULL)
+        isin_response = supabase.table('watchlistdata') \
+            .select('isin') \
+            .eq('watchlistid', watchlist_id) \
+            .eq('userid', user_id) \
+            .is_('category', 'null') \
+            .execute()
 
-        target_watchlist['isin'].remove(isin)
-
-        if not supabase_connected:
-            return jsonify({'message': 'Database service unavailable. Please try again later.'}), 503
-
-        supabase.table('UserData').update({'WatchListID': watchlists}).eq('UserID', user_id).execute()
+        # Get category (where isin is NULL)
+        cat_response = supabase.table('watchlistdata') \
+            .select('category') \
+            .eq('watchlistid', watchlist_id) \
+            .eq('userid', user_id) \
+            .is_('isin', 'null') \
+            .execute()
+            
+        watchlist_name = wl_name_response.data[0]['watchlistname'] if wl_name_response.data else "Unknown"
+        isins = [row['isin'] for row in isin_response.data] if isin_response.data else []
+        category = cat_response.data[0]['category'] if cat_response.data else None
+        
+        updated_watchlist = {
+            '_id': watchlist_id,
+            'watchlistName': watchlist_name,
+            'category': category,
+            'isin': isins
+        }
 
         logger.debug(f"ISIN {isin} removed from watchlist for user: {user_id}")
         return jsonify({
             'message': 'ISIN removed from watchlist!',
-            'watchlist': target_watchlist,
-            'watchlists': watchlists
+            'watchlist': updated_watchlist
         }), 200
+        
     except Exception as e:
         logger.error(f"Remove from watchlist error: {str(e)}")
         return jsonify({'message': f'Failed to remove ISIN from watchlist: {str(e)}'}), 500
@@ -683,41 +822,68 @@ def delete_watchlist(current_user, watchlist_id):
     logger.info(f"Delete watchlist {watchlist_id} for user: {user_id}")
 
     try:
-        watchlists = current_user.get('WatchListID', [])
+        # First verify the watchlist belongs to the user
+        wl_check = supabase.table('watchlistnamedata').select('watchlistid') \
+            .eq('watchlistid', watchlist_id).eq('userid', user_id).execute()
+        
+        if not wl_check.data:
+            return jsonify({'message': 'Watchlist not found or unauthorized!'}), 404
+        
+        # The foreign key constraint with ON DELETE CASCADE will automatically delete 
+        # related watchlistdata entries when the parent watchlistnamedata is deleted
+        delete_response = supabase.table('watchlistnamedata') \
+            .delete() \
+            .eq('watchlistid', watchlist_id) \
+            .eq('userid', user_id) \
+            .execute()
+            
+        # Check for error and empty data instead of status_code
+        if (hasattr(delete_response, 'error') and delete_response.error) or not delete_response.data:
+            return jsonify({'message': 'Failed to delete watchlist!'}), 500
+            
+        # Get the updated list of watchlists to return
+        wl_response = supabase.table('watchlistnamedata') \
+            .select('watchlistid, watchlistname') \
+            .eq('userid', user_id).execute()
+            
+        watchlists = []
+        for entry in wl_response.data:
+            wl_id = entry['watchlistid']
+            wl_name = entry['watchlistname']
+            
+            # Get ISINs (where category is NULL)
+            isin_response = supabase.table('watchlistdata') \
+                .select('isin') \
+                .eq('watchlistid', wl_id) \
+                .eq('userid', user_id) \
+                .is_('category', 'null') \
+                .execute()
 
-        if watchlists is None or not isinstance(watchlists, list) or not watchlists:
-            return jsonify({'message': 'No watchlists found!'}), 404
-
-        # Find and remove the watchlist
-        watchlist_found = False
-        updated_watchlists = []
-        for watchlist in watchlists:
-            if watchlist.get('_id') != watchlist_id:
-                updated_watchlists.append(watchlist)
-            else:
-                watchlist_found = True
+            # Get category (where isin is NULL)
+            cat_response = supabase.table('watchlistdata') \
+                .select('category') \
+                .eq('watchlistid', wl_id) \
+                .eq('userid', user_id) \
+                .is_('isin', 'null') \
+                .execute()
                 
-        if not watchlist_found:
-            return jsonify({'message': 'Watchlist not found!'}), 404
-
-        # Ensure there's at least one watchlist
-        if not updated_watchlists:
-            updated_watchlists = [{
-                "_id": str(uuid.uuid4()),
-                "watchlistName": "My Watchlist",
-                "isin": []
-            }]
-
-        if not supabase_connected:
-            return jsonify({'message': 'Database service unavailable. Please try again later.'}), 503
-
-        supabase.table('UserData').update({'WatchListID': updated_watchlists}).eq('UserID', user_id).execute()
+            isins = [row['isin'] for row in isin_response.data] if isin_response.data else []
+            category = cat_response.data[0]['category'] if cat_response.data else None
+            
+            watchlists.append({
+                '_id': wl_id,
+                'watchlistName': wl_name,
+                'category': category,
+                'isin': isins
+            })
+            
 
         logger.debug(f"Watchlist {watchlist_id} deleted for user: {user_id}")
         return jsonify({
             'message': 'Watchlist deleted successfully!',
-            'watchlists': updated_watchlists
+            'watchlists': watchlists
         }), 200
+        
     except Exception as e:
         logger.error(f"Delete watchlist error: {str(e)}")
         return jsonify({'message': f'Failed to delete watchlist: {str(e)}'}), 500
@@ -733,38 +899,252 @@ def clear_watchlist(current_user, watchlist_id):
     logger.info(f"Clear watchlist {watchlist_id} for user: {user_id}")
 
     try:
-        watchlists = current_user.get('WatchListID', [])
-
-        if watchlists is None or not isinstance(watchlists, list) or not watchlists:
-            return jsonify({'message': 'No watchlists found!'}), 404
-
-        # Find the target watchlist
-        target_watchlist = None
-        for watchlist in watchlists:
-            if watchlist.get('_id') == watchlist_id:
-                target_watchlist = watchlist
-                break
-                
-        if not target_watchlist:
-            return jsonify({'message': 'Watchlist not found!'}), 404
+        # First verify the watchlist belongs to the user
+        wl_check = supabase.table('watchlistnamedata').select('watchlistid, watchlistname') \
+            .eq('watchlistid', watchlist_id).eq('userid', user_id).execute()
+        
+        if not wl_check.data:
+            return jsonify({'message': 'Watchlist not found or unauthorized!'}), 404
             
-        # Clear the ISINs
-        target_watchlist['isin'] = []
+        watchlist_name = wl_check.data[0]['watchlistname']
+        
+        # Delete only the ISIN entries (keep the category)
+        clear_response = supabase.table('watchlistdata') \
+            .delete() \
+            .eq('watchlistid', watchlist_id) \
+            .eq('userid', user_id) \
+            .not_.is_('isin', 'null') \
+            .execute()
+            
+        # Check for error instead of status_code
+        if hasattr(clear_response, 'error') and clear_response.error:
+            return jsonify({'message': 'Failed to clear watchlist!'}), 500
+            
+        # Get all watchlists for return
+        wl_response = supabase.table('watchlistnamedata') \
+            .select('watchlistid, watchlistname') \
+            .eq('userid', user_id).execute()
+            
+        watchlists = []
+        for entry in wl_response.data:
+            wl_id = entry['watchlistid']
+            wl_name = entry['watchlistname']
+            
+            # Get ISINs (where category is NULL)
+            isin_response = supabase.table('watchlistdata') \
+                .select('isin') \
+                .eq('watchlistid', wl_id) \
+                .eq('userid', user_id) \
+                .is_('category', 'null') \
+                .execute()
 
-        if not supabase_connected:
-            return jsonify({'message': 'Database service unavailable. Please try again later.'}), 503
-
-        supabase.table('UserData').update({'WatchListID': watchlists}).eq('UserID', user_id).execute()
+            # Get category (where isin is NULL)
+            cat_response = supabase.table('watchlistdata') \
+                .select('category') \
+                .eq('watchlistid', wl_id) \
+                .eq('userid', user_id) \
+                .is_('isin', 'null') \
+                .execute()
+                
+            isins = [row['isin'] for row in isin_response.data] if isin_response.data else []
+            category = cat_response.data[0]['category'] if cat_response.data else None
+            
+            watchlists.append({
+                '_id': wl_id,
+                'watchlistName': wl_name,
+                'category': category,
+                'isin': isins
+            })
+            
+        # Find the cleared watchlist in the list
+        cleared_watchlist = next((wl for wl in watchlists if wl['_id'] == watchlist_id), None)
+        if not cleared_watchlist:
+            cleared_watchlist = {
+                '_id': watchlist_id,
+                'watchlistName': watchlist_name,
+                'category': None, 
+                'isin': []
+            }
 
         logger.debug(f"Watchlist {watchlist_id} cleared for user: {user_id}")
         return jsonify({
             'message': 'Watchlist cleared successfully!',
-            'watchlist': target_watchlist,
+            'watchlist': cleared_watchlist,
             'watchlists': watchlists
         }), 200
+        
     except Exception as e:
         logger.error(f"Clear watchlist error: {str(e)}")
         return jsonify({'message': f'Failed to clear watchlist: {str(e)}'}), 500
+    
+@app.route('/api/watchlist/bulk_add', methods=['POST', 'OPTIONS'])
+@auth_required
+def bulk_add_isins(current_user):
+    """Add multiple ISINs to a watchlist in a single operation"""
+    if request.method == 'OPTIONS':
+        return _handle_options()
+
+    data = request.get_json() or {}
+    user_id = current_user['UserID']
+    logger.info(f"Bulk add ISINs for user: {user_id}")
+
+    try:
+        # Required parameters
+        watchlist_id = data.get('watchlist_id')
+        isins = data.get('isins', [])
+        category = data.get('category')  # Optional
+
+        # Validate parameters
+        if not watchlist_id:
+            return jsonify({'message': 'watchlist_id is required'}), 400
+            
+        if not isinstance(isins, list):
+            return jsonify({'message': 'isins must be an array'}), 400
+            
+        if len(isins) == 0:
+            return jsonify({'message': 'isins array cannot be empty'}), 400
+        
+        # Verify the watchlist exists and belongs to the user
+        wl_check = supabase.table('watchlistnamedata').select('watchlistid') \
+            .eq('watchlistid', watchlist_id).eq('userid', user_id).execute()
+            
+        if not wl_check.data:
+            return jsonify({'message': 'Watchlist not found or unauthorized'}), 404
+
+        # Set category if provided
+        if category:
+            # Check if category row exists
+            cat_check = supabase.table('watchlistdata').select('category') \
+                .eq('watchlistid', watchlist_id) \
+                .eq('userid', user_id) \
+                .is_('isin', 'null') \
+                .execute()
+                
+            if cat_check.data:
+                # Update existing category
+                supabase.table('watchlistdata') \
+                    .update({'category': category}) \
+                    .eq('watchlistid', watchlist_id) \
+                    .eq('userid', user_id) \
+                    .is_('isin', 'null') \
+                    .execute()
+            else:
+                # Insert new category row
+                supabase.table('watchlistdata').insert({
+                    'watchlistid': watchlist_id,
+                    'userid': user_id,
+                    'category': category,
+                    'isin': None
+                }).execute()
+
+        # Track results
+        successful_isins = []
+        failed_isins = []
+        duplicate_isins = []
+        
+        # Process each ISIN individually
+        for isin in isins:
+            # Skip None or empty values
+            if not isin:
+                continue
+                
+            # Validate ISIN format
+            if not isinstance(isin, str) or len(isin) != 12 or not isin.isalnum():
+                failed_isins.append({
+                    'isin': isin, 
+                    'reason': 'Invalid ISIN format. ISIN must be a 12-character alphanumeric code.'
+                })
+                continue
+                
+            # Check if ISIN already exists in this watchlist
+            check = supabase.table('watchlistdata').select('isin') \
+                .eq('watchlistid', watchlist_id) \
+                .eq('userid', user_id) \
+                .eq('isin', isin) \
+                .execute()
+                
+            if check.data:
+                duplicate_isins.append(isin)
+                continue
+            
+            # Insert ISIN row (with null category)
+            try:
+                insert = supabase.table('watchlistdata').insert({
+                    'watchlistid': watchlist_id,
+                    'userid': user_id,
+                    'isin': isin,
+                    'category': None
+                }).execute()
+                
+                # Check for errors
+                if hasattr(insert, 'error') and insert.error:
+                    failed_isins.append({
+                        'isin': isin, 
+                        'reason': f"Database error: {insert.error}"
+                    })
+                else:
+                    successful_isins.append(isin)
+                    
+            except Exception as e:
+                failed_isins.append({
+                    'isin': isin, 
+                    'reason': str(e)
+                })
+        
+        # Get updated watchlist data
+        # Get ISINs (where category is NULL)
+        isin_response = supabase.table('watchlistdata') \
+            .select('isin') \
+            .eq('watchlistid', watchlist_id) \
+            .eq('userid', user_id) \
+            .is_('category', 'null') \
+            .execute()
+
+        # Get category (where isin is NULL)
+        cat_response = supabase.table('watchlistdata') \
+            .select('category') \
+            .eq('watchlistid', watchlist_id) \
+            .eq('userid', user_id) \
+            .is_('isin', 'null') \
+            .execute()
+            
+        # Get watchlist name
+        name_response = supabase.table('watchlistnamedata') \
+            .select('watchlistname') \
+            .eq('watchlistid', watchlist_id) \
+            .execute()
+            
+        watchlist_name = name_response.data[0]['watchlistname'] if name_response.data else "Unknown"
+        isins = [row['isin'] for row in isin_response.data] if isin_response.data else []
+        category_value = cat_response.data[0]['category'] if cat_response.data else None
+        
+        # Prepare watchlist object for response
+        updated_watchlist = {
+            '_id': watchlist_id,
+            'watchlistName': watchlist_name,
+            'category': category_value,
+            'isin': isins
+        }
+
+        # Construct result message
+        result_message = f"Added {len(successful_isins)} ISINs successfully"
+        if duplicate_isins:
+            result_message += f", {len(duplicate_isins)} duplicates skipped"
+        if failed_isins:
+            result_message += f", {len(failed_isins)} failed"
+
+        logger.debug(f"Bulk add complete: {result_message}")
+        return jsonify({
+            'message': result_message,
+            'successful': successful_isins,
+            'duplicates': duplicate_isins,
+            'failed': failed_isins,
+            'watchlist': updated_watchlist
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Bulk add ISINs error: {str(e)}")
+        return jsonify({'message': f'Failed to add ISINs: {str(e)}'}), 500
     
 @app.route('/api/corporate_filings', methods=['GET', 'OPTIONS'])
 def get_corporate_filings():
@@ -979,6 +1359,29 @@ def test_corporate_filings():
         'note': 'This is test data from the test endpoint'
     }), 200
 
+@app.route('/api/stock_price', methods=['GET', 'OPTIONS'])
+@auth_required
+def get_stock_price():
+    """Endpoint to get stock price data"""
+    if request.method == 'OPTIONS':
+        return _handle_options()
+    
+    # Example implementation for stock price retrieval
+    isin = request.args.get('isin', '')
+    if not isin:
+        return jsonify({'message': 'Missing isin parameter!'}), 400
+    
+    response = supabase.table('stockpricedata').select('close','date').eq('isin', isin).order('date', desc=True).execute()
+    if hasattr(response, 'error') and response.error:
+        logger.error(f"Failed to retrieve stock price: {response.error}")
+        return jsonify({'message': 'Failed to retrieve stock price!'}), 500
+    if not response.data:
+        logger.warning(f"No stock price data found for ISIN: {isin}")
+        return jsonify({'message': 'No stock price data found!'}), 404
+    stock_price = response.data
+
+    return jsonify(stock_price), 200
+
 # @# Add this to the top of your liveserver.py file, after the existing imports
 
 # Advanced in-memory cache for deduplication
@@ -1183,6 +1586,16 @@ def insert_new_announcement():
 
         logger.info(f"Broadcasting: {new_announcement}")
         socketio.emit('new_announcement', new_announcement)
+        # isin = data.get('isin')
+        # category = data.get('category')
+        # email_ids = get_all_users_email(isin, category)
+        # if email_ids:
+        #     logger.info(f"Sending batch email to: {email_ids}")
+        #     send_batch_mail(email_ids, new_announcement)
+        #     # Send batch email
+        # else:
+        #     logger.info("No email IDs found for the announcement")
+        
         return jsonify({'message': 'Test announcement sent successfully!', 'status': 'success'}), 200
 
     except Exception as e:
