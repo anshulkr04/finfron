@@ -1735,7 +1735,7 @@ def list_users():
 # Function to start the BSE scraper
 # Add this function to your liveserver.py file to fix the error
 
-def start_scraper():
+def start_scraper_bse():
     """Start the BSE scraper in a separate thread with better error handling"""
     try:
         logger.info("Starting BSE scraper in background thread...")
@@ -1813,6 +1813,84 @@ def start_scraper():
         logger.error(f"Error importing scraper module: {str(e)}")
         logger.error(traceback.format_exc())
 
+def start_scraper_nse():
+    """Start the BSE scraper in a separate thread with better error handling"""
+    try:
+        logger.info("Starting BSE scraper in background thread...")
+        
+        # Get the path to the bse_scraper.py file
+        scraper_path = Path(__file__).parent / "nse_scraper.py"
+        
+        if not scraper_path.exists():
+            logger.error(f"Scraper file not found at: {scraper_path}")
+            return
+            
+        # Import the scraper module dynamically
+        spec = importlib.util.spec_from_file_location("nse_scraper", scraper_path)
+        scraper_module = importlib.util.module_from_spec(spec)
+        sys.modules["nse_scraper"] = scraper_module
+        spec.loader.exec_module(scraper_module)
+        
+        # Create and run the scraper
+        today = datetime.datetime.today().strftime('%d-%m-%Y')
+        
+        try:
+            # Create a flag file to signal that this is the first run
+            first_run_flag_path = Path(__file__).parent / "data" / "first_run_complete.txt"
+            os.makedirs(os.path.dirname(first_run_flag_path), exist_ok=True)
+            
+            # Mark as first run by creating the flag file
+            with open(first_run_flag_path, 'w') as f:
+                f.write(f"First run on {datetime.datetime.now().isoformat()}")
+            
+            logger.info("Created first run flag file")
+                
+            # Initialize the scraper
+            scraper = scraper_module.NseScraper(today, today)
+            
+            # First run - this will use the flag file internally
+            try:
+                scraper.run()  # No parameter passed here
+                logger.info("Initial scraper run completed")
+            except Exception as e:
+                logger.error(f"Error in initial scraper run: {str(e)}")
+                logger.error(traceback.format_exc())
+            
+            # Remove the first run flag file
+            if os.path.exists(first_run_flag_path):
+                os.remove(first_run_flag_path)
+                logger.info("Removed first run flag file")
+            
+            # Then poll periodically
+            check_interval = 10  # seconds
+            while True:
+                try:
+                    # Wait for next check interval
+                    time.sleep(check_interval)
+                    
+                    # Update date to current date
+                    current_day = datetime.datetime.today().strftime('%d-%m-%Y')
+                    logger.debug(f"Running scheduled scraper check for date: {current_day}")
+                    
+                    # Create a new scraper instance each time to avoid state issues
+                    scraper = scraper_module.NseScraper(current_day, current_day)
+                    
+                    # Run the scraper (after the first run)
+                    scraper.run()
+                    
+                except Exception as e:
+                    logger.error(f"Error in periodic scraper run: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    # Continue the loop even after errors
+            
+        except Exception as e:
+            logger.error(f"Error creating scraper instance: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+    except Exception as e:
+        logger.error(f"Error importing scraper module: {str(e)}")
+        logger.error(traceback.format_exc())
+
 # Custom error handlers
 @app.errorhandler(404)
 def not_found(error):
@@ -1843,9 +1921,15 @@ if __name__ == '__main__':
     logger.info(f"API health endpoint: http://localhost:{PORT}/api/health")
     logger.info(f"WebSocket server enabled on port {PORT}")
     
-    # Start the scraper in a separate thread
+    # Start the BSEscraper in a separate thread
     logger.info("Starting scraper thread...")
-    scraper_thread = threading.Thread(target=start_scraper, daemon=True)
+    scraper_thread = threading.Thread(target=start_scraper_bse, daemon=True)
+    scraper_thread.start()
+    logger.info("Scraper thread started")
+
+    # Start the NSEscraper in a separate thread
+    logger.info("Starting scraper thread...")
+    scraper_thread = threading.Thread(target=start_scraper_nse, daemon=True)
     scraper_thread.start()
     logger.info("Scraper thread started")
     

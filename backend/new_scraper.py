@@ -15,6 +15,11 @@ from datetime import datetime
 import uuid
 import threading
 from pathlib import Path
+try:
+    import PyPDF2
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
 
 # Configure logging
 logging.basicConfig(
@@ -61,7 +66,7 @@ def get_data_dir():
 def save_latest_announcement(announcement, filename=None):
     """Save the latest announcement details to a JSON file"""
     if filename is None:
-        filename = get_data_dir() / "latest_announcement.json"
+        filename = get_data_dir() / "latest_announcement_bse.json"
     try:
         with open(filename, 'w') as f:
             json.dump(announcement, f, indent=4)
@@ -72,7 +77,7 @@ def save_latest_announcement(announcement, filename=None):
 def load_latest_announcement(filename=None):
     """Load the latest processed announcement from JSON file"""
     if filename is None:
-        filename = get_data_dir() / "latest_announcement.json"
+        filename = get_data_dir() / "latest_announcement_bse.json"
     try:
         if os.path.exists(filename):
             with open(filename, 'r') as f:
@@ -276,6 +281,81 @@ def extract_symbol(url):
     
     return None
 
+def get_pdf_page_count(filepath):
+    """Get the number of pages in a PDF file"""
+    if not PDF_SUPPORT:
+        logger.warning("PyPDF2 not installed, cannot count PDF pages")
+        return None
+    
+    try:
+        with open(filepath, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            page_count = len(pdf_reader.pages)
+            logger.info(f"PDF has {page_count} pages")
+            return page_count
+    except Exception as e:
+        logger.error(f"Error counting PDF pages: {e}")
+        return None
+    
+def get_category(text):
+    category_prompt = """now please categorize the document into one of the categories: [
+    "Annual Report",
+    "Agreements/MoUs",
+    "Anti-dumping Duty",
+    "Buyback",
+    "Bonus/Stock Split",
+    "Change in Address",
+    "Change in MOA",
+    "Clarifications/Confirmations",
+    "Closure of Factory",
+    "Concall Transcript",
+    "Consolidation of Shares",
+    "Credit Rating",
+    "Debt Reduction",
+    "Debt & Financing",
+    "Delisting",
+    "Demerger",
+    "Change in KMP",
+    "Demise of KMP",
+    "Disruption of Operations",
+    "Divestitures",
+    "DRHP",
+    "Expansion",
+    "Financial Results",
+    "Fundraise - Preferential Issue",
+    "Fundraise - QIP",
+    "Fundraise - Rights Issue",
+    "Global Pharma Regulation",
+    "Incorporation/Cessation of Subsidiary",
+    "Increase in Share Capital",
+    "Insolvency and Bankruptcy",
+    "Interest Rates Updates",
+    "Investor Presentation",
+    "Investor/Analyst Meet",
+    "Joint Ventures",
+    "Litigation & Notices",
+    "Mergers/Acquisitions",
+    "Name Change",
+    "New Order",
+    "New Product",
+    "One Time Settlement (OTS)",
+    "Open Offer",
+    "Operational Update",
+    "PLI Scheme",
+    "Procedural/Administrative",
+    "Reduction in Share Capital",
+    "Regulatory Approvals/Orders",
+    "Trading Suspension",
+    "USFDA"
+]
+just mention the category , nothing else.
+"""
+    chat_session = genai_client.chats().create(model="gemini-2.0-flash")
+    response = chat_session.send_message(
+        [category_prompt, text]
+    )
+    return response.text.strip() if hasattr(response, 'text') else "Category not generated"
+
 
 # Initialize Gemini client with retries
 genai_client = None
@@ -416,7 +496,7 @@ class BseScraper:
             logger.error(f"Error in AI processing: {e}")
             return "Error", f"Error processing file: {str(e)}"
 
-    def process_pdf(self, pdf_file):
+    def process_pdf(self, pdf_file, max_pages=200):
         """Download and process PDF with error handling"""
         if not pdf_file:
             logger.error("No PDF file specified")
@@ -460,6 +540,7 @@ class BseScraper:
                 if category == "Error":
                     logger.error(f"AI processing error: {ai_summary}")
                     return "Error", ai_summary
+                
                 
                 ai_summary = remove_markdown_tags(ai_summary)
                 return category, ai_summary
@@ -556,6 +637,7 @@ class BseScraper:
             # Check for negative keywords
             if check_for_negative_keywords(bse_summary):
                 logger.info(f"Negative keyword found in announcement: {bse_summary}")
+                return False
             elif check_for_pdf(pdf_file):
                 logger.info(f"Processing PDF: {pdf_file}")
                 category, ai_summary = self.process_pdf(pdf_file) 

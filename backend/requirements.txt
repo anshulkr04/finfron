@@ -19,3 +19,4 @@ gevent-websocket
 python-engineio
 python-socketio
 resend
+PyPDF2
